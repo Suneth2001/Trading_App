@@ -1,4 +1,4 @@
-name: Build & Release iOS (.ipa) and Android (.apk) App Files
+name: Deploy iPhone Web App (GitHub Pages) & Build iOS IPA
 
 on:
   push:
@@ -11,7 +11,29 @@ permissions:
   id-token: write
 
 jobs:
-  build-ios-ipa-and-release:
+  deploy-iphone-webapp:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install & Build Frontend with Embedded Standalone Engine
+        working-directory: Trading_App/frontend
+        run: |
+          npm install
+          npm run build
+
+      - name: Upload Pages Artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: Trading_App/frontend/dist
+
+  build-ios-ipa:
     runs-on: macos-latest
     steps:
       - name: Checkout Repository
@@ -54,20 +76,3 @@ jobs:
         with:
           name: ApexAlgo-v1.0-iOS-IPA
           path: Trading_App/frontend/ios/App/ApexAlgo-v1.0-iOS.ipa
-
-      - name: Publish downloadable .IPA, .APK & .mobileconfig to GitHub Releases
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: v1.0.0
-          name: "ApexAlgo Pro v1.0 - iPhone (.ipa / .mobileconfig) & Android (.apk)"
-          body: |
-            ## 📱 ApexAlgo Pro Mobile App Downloads
-            - **iPhone (1-Tap Direct iOS App Installer - No PC Needed):** Download and tap `ApexAlgo-iPhone-Installer.mobileconfig` in Safari on your iPhone, then go to **Settings -> Profile Downloaded -> Install**.
-            - **iPhone (Native `.ipa` for Sideloadly / AltStore / Scarlet / ESign):** Download `ApexAlgo-v1.0-iOS.ipa`.
-            - **Android (`.apk` for Android 6+):** Download `ApexAlgo-v1.0-Android6+.apk`.
-          files: |
-            Trading_App/frontend/ios/App/ApexAlgo-v1.0-iOS.ipa
-            ApexAlgo-v1.0-Android6+.apk
-            ApexAlgo-iPhone-Installer.mobileconfig
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

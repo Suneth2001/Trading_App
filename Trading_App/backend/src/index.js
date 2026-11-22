@@ -572,8 +572,8 @@ app.get('/ApexAlgo-iPhone.mobileconfig', (req, res) => {
   res.send(mobileConfigXml);
 });
 
-// Start Server
-server.listen(CONFIG.PORT, () => {
+// Start Server on 0.0.0.0 so both localhost and Mobile LAN devices can connect
+server.listen(CONFIG.PORT, '0.0.0.0', () => {
   console.log(`================================================================`);
   console.log(`  CRYPTO AUTO-TRADING ENGINE BACKEND RUNNING ON PORT ${CONFIG.PORT} `);
   console.log(`  TRADINGVIEW WEBHOOK URL: http://localhost:${CONFIG.PORT}${CONFIG.TRADINGVIEW.WEBHOOK_PATH}`);

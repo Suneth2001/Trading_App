@@ -1,7 +1,7 @@
 /**
- * Embedded Standalone Crypto Auto-Trading Backend Engine for Android APK & Offline/Mobile Mode.
- * Runs 100% in-app when the external Node.js server is unreachable, connecting directly to
- * Binance Live WebSockets and Public/Signed REST APIs.
+ * Embedded Standalone Crypto Auto-Trading Backend Engine for iPhone (iOS PWA / .ipa) & Android APK.
+ * Connects directly to Binance Live WebSockets, Public REST APIs, and Signed Live USD-M Futures API
+ * (using pure-JS HMAC-SHA256) so real Binance Equity, Balance, Positions, and Live Orders work 100% on Mobile!
  */
 
 export const DEFAULT_PAIRS = [
@@ -85,6 +85,92 @@ export const STRATEGIES = [
     recommendedLeverage: 10
   }
 ];
+
+// ================= PURE-JS HMAC-SHA256 FOR BINANCE SIGNED API ================= //
+
+function sha256Bytes(ascii) {
+  function rightRotate(v, a) { return (v >>> a) | (v << (32 - a)); }
+  const mathPow = Math.pow;
+  const maxWord = mathPow(2, 32);
+  const result = [];
+  const words = [];
+  const asciiBitLength = ascii.length * 8;
+  let hash = [];
+  const k = [];
+  let primeCounter = 0;
+  const isComposite = {};
+
+  for (let candidate = 2; primeCounter < 64; candidate++) {
+    if (!isComposite[candidate]) {
+      for (let i = 0; i < 313; i += candidate) isComposite[i] = candidate;
+      hash[primeCounter] = (mathPow(candidate, 0.5) * maxWord) | 0;
+      k[primeCounter++] = (mathPow(candidate, 1 / 3) * maxWord) | 0;
+    }
+  }
+
+  ascii += '\x80';
+  while ((ascii.length % 64) - 56) ascii += '\x00';
+  for (let i = 0; i < ascii.length; i++) {
+    const j = ascii.charCodeAt(i);
+    words[i >> 2] |= j << ((3 - (i % 4)) * 8);
+  }
+  words[words.length] = (asciiBitLength / maxWord) | 0;
+  words[words.length] = asciiBitLength;
+
+  for (let j = 0; j < words.length;) {
+    const w = words.slice(j, (j += 16));
+    const oldHash = hash.slice(0);
+    for (let i = 0; i < 64; i++) {
+      const w15 = w[i - 15], w2 = w[i - 2];
+      const a = hash[0], e = hash[4];
+      const temp1 =
+        hash[7] +
+        (rightRotate(e, 6) ^ rightRotate(e, 11) ^ rightRotate(e, 25)) +
+        ((e & hash[5]) ^ (~e & hash[6])) +
+        k[i] +
+        (w[i] =
+          i < 16
+            ? w[i]
+            : (w[i - 16] +
+                (rightRotate(w15, 7) ^ rightRotate(w15, 18) ^ (w15 >>> 3)) +
+                w[i - 7] +
+                (rightRotate(w2, 17) ^ rightRotate(w2, 19) ^ (w2 >>> 10))) |
+              0);
+      const temp2 =
+        (rightRotate(a, 2) ^ rightRotate(a, 13) ^ rightRotate(a, 22)) +
+        ((a & hash[1]) ^ (a & hash[2]) ^ (hash[1] & hash[2]));
+      hash = [(temp1 + temp2) | 0].concat(hash);
+      hash[4] = (hash[4] + temp1) | 0;
+      hash.pop();
+    }
+    for (let i = 0; i < 8; i++) hash[i] = (hash[i] + oldHash[i]) | 0;
+  }
+
+  for (let i = 0; i < 8; i++) {
+    for (let j = 3; j + 1; j--) {
+      result.push((hash[i] >> (j * 8)) & 255);
+    }
+  }
+  return result;
+}
+
+export function hmacSha256Hex(keyStr, messageStr) {
+  let key = [];
+  for (let i = 0; i < keyStr.length; i++) key.push(keyStr.charCodeAt(i));
+  if (key.length > 64) key = sha256Bytes(keyStr);
+  while (key.length < 64) key.push(0);
+  let oKeyPad = '';
+  let iKeyPad = '';
+  for (let i = 0; i < 64; i++) {
+    oKeyPad += String.fromCharCode(key[i] ^ 0x5c);
+    iKeyPad += String.fromCharCode(key[i] ^ 0x36);
+  }
+  const innerBytes = sha256Bytes(iKeyPad + messageStr);
+  let innerStr = '';
+  for (let i = 0; i < innerBytes.length; i++) innerStr += String.fromCharCode(innerBytes[i]);
+  const outerBytes = sha256Bytes(oKeyPad + innerStr);
+  return outerBytes.map(b => ('0' + b.toString(16)).slice(-2)).join('');
+}
 
 // ================= PURE JS TECHNICAL INDICATORS ================= //
 
@@ -191,7 +277,6 @@ export function calculateAllIndicators(candles) {
   const currentRsi = Number((rsiValues[rsiValues.length - 1] ?? 50).toFixed(2));
   const prevRsi = Number((rsiValues[rsiValues.length - 2] ?? currentRsi).toFixed(2));
 
-  // StochRSI approximation
   const recentRsi = rsiValues.slice(-14);
   const minRsi = Math.min(...recentRsi);
   const maxRsi = Math.max(...recentRsi);
@@ -234,7 +319,6 @@ export function calculateAllIndicators(candles) {
   const currentAtr = atrArr[atrArr.length - 1] || price * 0.015;
   const atrPct = Number(((currentAtr / price) * 100).toFixed(2));
 
-  // SuperTrend
   let stDir = 'BULLISH';
   let prevUpper = 0;
   let prevLower = 0;
@@ -258,12 +342,10 @@ export function calculateAllIndicators(candles) {
     value: Number((stDir === 'BULLISH' ? prevLower : prevUpper).toFixed(2))
   };
 
-  // Volume & OBV
   const volSma = calcSMA(volumes, 20);
   const currentVolMa = volSma[volSma.length - 1] || volumes[n - 1] || 1;
   const volumeSurgeRatio = currentVolMa > 0 ? volumes[n - 1] / currentVolMa : 1;
 
-  // Market Structure
   const slice30 = candles.slice(-30);
   const swingHigh = Math.max(...slice30.map(c => c.high));
   const swingLow = Math.min(...slice30.map(c => c.low));
@@ -289,7 +371,6 @@ export function calculateAllIndicators(candles) {
     isTestingResistance
   };
 
-  // Divergence check
   let divergence = { detected: false, type: null, label: null, strength: null };
   if (currentRsi < 38 && currentRsi > prevRsi + 1.5) {
     divergence = {
@@ -307,7 +388,6 @@ export function calculateAllIndicators(candles) {
     };
   }
 
-  // Candle Patterns
   const candlePatterns = [];
   const currC = candles[n - 1];
   const prevC = candles[n - 2] || currC;
@@ -424,6 +504,10 @@ class StandaloneTradingEngine {
     this.positions = savedState.positions ?? [];
     this.orderHistory = savedState.orderHistory ?? [];
     this.isLive = false;
+    this.apiKey = localStorage.getItem('binance_api_key') || '';
+    this.apiSecret = localStorage.getItem('binance_api_secret') || '';
+    this.liveSummary = null;
+    this.livePositions = [];
     this.tradeCounter = (this.positions.length + this.orderHistory.length) + 1;
 
     this.guardianSettings = savedState.guardianSettings ?? {
@@ -501,16 +585,203 @@ class StandaloneTradingEngine {
     }
   }
 
+  // ================= DIRECT BINANCE LIVE SIGNED REST API (MOBILE & WEB) ================= //
+
+  async _getBinanceServerTime() {
+    try {
+      const res = await window._nativeFetch('https://fapi.binance.com/fapi/v1/time');
+      const data = await res.json();
+      if (data && data.serverTime) return data.serverTime;
+    } catch {}
+    return Date.now();
+  }
+
+  async _signedFuturesRequest(method, endpoint, params = {}) {
+    if (!this.apiKey || !this.apiSecret) {
+      throw new Error('Binance API Key & Secret are not configured.');
+    }
+    const serverTime = await this._getBinanceServerTime();
+    const allParams = { ...params, timestamp: serverTime, recvWindow: 60000 };
+    const qs = Object.keys(allParams)
+      .filter(k => allParams[k] !== undefined && allParams[k] !== null)
+      .map(k => `${encodeURIComponent(k)}=${encodeURIComponent(allParams[k])}`)
+      .join('&');
+    const signature = hmacSha256Hex(this.apiSecret, qs);
+    const url = `https://fapi.binance.com${endpoint}?${qs}&signature=${signature}`;
+
+    const res = await window._nativeFetch(url, {
+      method,
+      headers: {
+        'X-MBX-APIKEY': this.apiKey
+      }
+    });
+    const data = await res.json();
+    if (!res.ok || (data && data.code && data.code < 0)) {
+      const msg = data?.msg || `Binance error (${res.status})`;
+      throw new Error(msg);
+    }
+    return data;
+  }
+
+  async verifyAndLoadLiveAccount(apiKey, apiSecret) {
+    this.apiKey = (apiKey || '').trim();
+    this.apiSecret = (apiSecret || '').trim();
+    if (!this.apiKey || !this.apiSecret) {
+      this.isLive = false;
+      this.liveSummary = null;
+      this.livePositions = [];
+      return {
+        success: true,
+        isLive: false,
+        message: 'Reverted to Paper Demo Trading',
+        summary: this.getAccountSummary(),
+        positions: [...this.positions]
+      };
+    }
+
+    // Call real Binance USD-M Futures Account endpoint
+    const accData = await this._signedFuturesRequest('GET', '/fapi/v2/account');
+    let availableBalance = parseFloat(accData.availableBalance || 0);
+    let totalWalletBalance = parseFloat(accData.totalWalletBalance || 0);
+    let totalMarginBalance = parseFloat(accData.totalMarginBalance || totalWalletBalance || 0);
+    let totalInitialMargin = parseFloat(accData.totalInitialMargin || 0);
+    let totalUnrealizedProfit = parseFloat(accData.totalUnrealizedProfit || 0);
+
+    // Check USDT asset specifically if top-level fields are 0
+    if (Array.isArray(accData.assets)) {
+      const usdtAsset = accData.assets.find(a => a.asset === 'USDT');
+      if (usdtAsset) {
+        availableBalance = parseFloat(usdtAsset.availableBalance || usdtAsset.walletBalance || availableBalance);
+        totalMarginBalance = parseFloat(usdtAsset.marginBalance || usdtAsset.walletBalance || totalMarginBalance);
+      }
+    }
+
+    const livePositions = (accData.positions || [])
+      .filter(p => Math.abs(parseFloat(p.positionAmt || 0)) > 0)
+      .map(p => {
+        const amt = parseFloat(p.positionAmt);
+        const side = amt > 0 ? 'LONG' : 'SHORT';
+        const size = Math.abs(amt);
+        const entryPrice = parseFloat(p.entryPrice || 0);
+        const livePrice = this.prices[p.symbol] || entryPrice;
+        const lev = parseInt(p.leverage || 10, 10);
+        const margin = parseFloat(p.initialMargin || p.positionInitialMargin || (size * entryPrice) / lev || 0);
+        const pnl = parseFloat(p.unrealizedProfit || 0);
+        const roe = margin > 0 ? (pnl / margin) * 100 : 0;
+        const notional = size * livePrice;
+        const maintMargin = parseFloat(p.maintMargin || notional * 0.01);
+        const marginBal = Math.max(0.01, margin + pnl);
+        const marginRatio = Math.min(100, Math.max(1, (maintMargin / marginBal) * 100));
+
+        return {
+          id: `BINANCE-${p.symbol}-${side}`,
+          symbol: p.symbol,
+          side,
+          size,
+          entryPrice,
+          currentPrice: Number(livePrice.toFixed(4)),
+          leverage: lev,
+          margin: Number(margin.toFixed(4)),
+          liquidationPrice: Number(parseFloat(p.liquidationPrice || 0).toFixed(4)),
+          marginRatio: Number(marginRatio.toFixed(1)),
+          unrealizedPnl: Number(pnl.toFixed(4)),
+          roePct: Number(roe.toFixed(2)),
+          source: 'BINANCE_LIVE',
+          openedAt: new Date(p.updateTime || Date.now()).toISOString()
+        };
+      });
+
+    this.isLive = true;
+    this.liveSummary = {
+      availableBalance: Number(availableBalance.toFixed(2)),
+      totalMargin: Number(totalInitialMargin.toFixed(2)),
+      totalUnrealizedPnl: Number(totalUnrealizedProfit.toFixed(2)),
+      equity: Number(totalMarginBalance.toFixed(2)),
+      isLive: true
+    };
+    this.livePositions = livePositions;
+
+    this.emit('account_summary', this.liveSummary);
+    this.emit('positions_update', this.livePositions);
+
+    return {
+      success: true,
+      isLive: true,
+      message: `Connected to Binance Futures Live! Balance: $${this.liveSummary.availableBalance.toFixed(2)} USDT (Equity: $${this.liveSummary.equity.toFixed(2)})`,
+      summary: this.liveSummary,
+      positions: this.livePositions
+    };
+  }
+
+  async executeLiveBinanceOrder({ symbol, side, amountUsdt, leverage = 10 }) {
+    const cleanSym = symbol.replace('/', '').toUpperCase();
+    const pairInfo = DEFAULT_PAIRS.find(p => p.symbol === cleanSym) || { precision: 2, minQty: 0.001 };
+    const price = this.prices[cleanSym];
+    if (!price || price <= 0) throw new Error(`Mark price unavailable for ${cleanSym}`);
+
+    try {
+      await this._signedFuturesRequest('POST', '/fapi/v1/leverage', {
+        symbol: cleanSym,
+        leverage: Number(leverage)
+      });
+    } catch {}
+
+    const rawQty = (Number(amountUsdt) * Number(leverage)) / price;
+    const stepDecimals = pairInfo.minQty < 1 ? String(pairInfo.minQty).split('.')[1]?.length || 3 : 0;
+    const quantity = Number(rawQty.toFixed(stepDecimals));
+    if (quantity <= 0) throw new Error(`Order size too small for ${cleanSym}`);
+
+    const orderSide = side === 'LONG' ? 'BUY' : 'SELL';
+    const order = await this._signedFuturesRequest('POST', '/fapi/v1/order', {
+      symbol: cleanSym,
+      side: orderSide,
+      type: 'MARKET',
+      quantity
+    });
+
+    await this.verifyAndLoadLiveAccount(this.apiKey, this.apiSecret);
+    return order;
+  }
+
+  async closeLiveBinancePosition(positionId) {
+    const pos = this.livePositions.find(p => p.id === positionId || p.symbol === positionId);
+    if (!pos) throw new Error('Live position not found');
+    const closeSide = pos.side === 'LONG' ? 'SELL' : 'BUY';
+    await this._signedFuturesRequest('POST', '/fapi/v1/order', {
+      symbol: pos.symbol,
+      side: closeSide,
+      type: 'MARKET',
+      quantity: pos.size,
+      reduceOnly: 'true'
+    });
+    await this.verifyAndLoadLiveAccount(this.apiKey, this.apiSecret);
+    return pos;
+  }
+
   start() {
     if (this.started) return;
     this.started = true;
     this._connectBinanceWs();
     this.fetchTickerStats();
 
-    // Guardian & Mark Price Update Loop (every 1.2s)
+    // Auto-restore saved live Binance credentials on mobile startup
+    const savedKey = localStorage.getItem('binance_api_key');
+    const savedSecret = localStorage.getItem('binance_api_secret');
+    if (savedKey && savedSecret) {
+      this.verifyAndLoadLiveAccount(savedKey, savedSecret).catch(() => {});
+    }
+
+    // Guardian & Mark Price Update Loop (every 1.5s)
     setInterval(() => {
       this._updatePositionsAndGuardian();
-    }, 1200);
+    }, 1500);
+
+    // Live Binance Account Sync Loop (every 3.5s when Live mode is active)
+    setInterval(() => {
+      if (this.isLive && this.apiKey && this.apiSecret) {
+        this.verifyAndLoadLiveAccount(this.apiKey, this.apiSecret).catch(() => {});
+      }
+    }, 3500);
 
     // Market Scanner Loop (every 8s)
     setTimeout(() => this.runMarketScan(), 800);
@@ -688,6 +959,9 @@ class StandaloneTradingEngine {
   }
 
   getAccountSummary() {
+    if (this.isLive && this.liveSummary) {
+      return this.liveSummary;
+    }
     const totalMargin = this.positions.reduce((s, p) => s + p.margin, 0);
     const totalUnrealizedPnl = this.positions.reduce((s, p) => s + (p.unrealizedPnl || 0), 0);
     const equity = this.balance + totalMargin + totalUnrealizedPnl;
@@ -699,8 +973,15 @@ class StandaloneTradingEngine {
       initialBalance: this.initialBalance,
       totalPnl: Number((equity - this.initialBalance).toFixed(2)),
       totalPnlPct: Number((((equity - this.initialBalance) / this.initialBalance) * 100).toFixed(2)),
-      isLive: this.isLive
+      isLive: false
     };
+  }
+
+  getActivePositions() {
+    if (this.isLive) {
+      return this.livePositions;
+    }
+    return this.positions;
   }
 
   openPosition({ symbol, side, amountUsdt, leverage = 10, tp = null, sl = null, trailingStopPct = null, source = 'MANUAL' }) {
@@ -784,6 +1065,7 @@ class StandaloneTradingEngine {
   }
 
   _updatePositionsAndGuardian() {
+    if (this.isLive) return;
     if (this.positions.length === 0) return;
     const g = this.guardianSettings;
     const toClose = [];
@@ -866,7 +1148,6 @@ class StandaloneTradingEngine {
         const longScore = Math.min(96, Math.max(20, longTrend + longStruct + longMom + longVol));
         const shortScore = Math.min(96, Math.max(20, shortTrend + shortStruct + shortMom + shortVol));
         const isLong = longScore >= shortScore;
-        const score = isLong ? longScore : shortScore;
         const slDist = Math.max(price * 0.015, atr * 1.2);
         const tp1Dist = slDist * 1.8;
         const tp2Dist = slDist * 3.0;
@@ -978,33 +1259,45 @@ class StandaloneTradingEngine {
     const now = Date.now();
     if (now - this.lastAutoTradeTime < 30000) return;
     const cfg = this.autopilotStatus.config;
-    if (this.positions.length >= cfg.maxOpenTrades) return;
+    const activePos = this.getActivePositions();
+    if (activePos.length >= cfg.maxOpenTrades) return;
 
     for (const coin of rankedCoins) {
       if (coin.confidence < cfg.minConfidence) continue;
       if (coin.action === 'LONG' && cfg.directionPreference === 'SHORT_ONLY') continue;
       if (coin.action === 'SHORT' && cfg.directionPreference === 'LONG_ONLY') continue;
-      if (this.positions.some(p => p.symbol === coin.symbol)) continue;
-      if (this.balance < cfg.allocationUsdt) break;
+      if (activePos.some(p => p.symbol === coin.symbol)) continue;
+
+      const avail = this.getAccountSummary().availableBalance;
+      if (avail < cfg.allocationUsdt) break;
 
       try {
-        const pos = this.openPosition({
-          symbol: coin.symbol,
-          side: coin.action,
-          amountUsdt: cfg.allocationUsdt,
-          leverage: cfg.leverage || 10,
-          tp: coin.tpPrice,
-          sl: coin.slPrice,
-          trailingStopPct: 2.0,
-          source: 'AI_AUTO_PILOT'
-        });
+        if (this.isLive) {
+          this.executeLiveBinanceOrder({
+            symbol: coin.symbol,
+            side: coin.action,
+            amountUsdt: cfg.allocationUsdt,
+            leverage: cfg.leverage || 10
+          }).catch(() => {});
+        } else {
+          const pos = this.openPosition({
+            symbol: coin.symbol,
+            side: coin.action,
+            amountUsdt: cfg.allocationUsdt,
+            leverage: cfg.leverage || 10,
+            tp: coin.tpPrice,
+            sl: coin.slPrice,
+            trailingStopPct: 2.0,
+            source: 'AI_AUTO_PILOT'
+          });
+          this.emit('autopilot_trade', {
+            id: `AP-${now}`,
+            timestamp: new Date().toISOString(),
+            message: `AI Auto-Pilot opened ${coin.action} on ${coin.symbol} @ $${coin.price} (Conf: ${coin.confidence}%)`,
+            position: pos
+          });
+        }
         this.lastAutoTradeTime = now;
-        this.emit('autopilot_trade', {
-          id: `AP-${now}`,
-          timestamp: new Date().toISOString(),
-          message: `AI Auto-Pilot opened ${coin.action} on ${coin.symbol} @ $${coin.price} (Conf: ${coin.confidence}%)`,
-          position: pos
-        });
         break;
       } catch {}
     }
@@ -1029,8 +1322,10 @@ class StandaloneTradingEngine {
     if (action === 'LONG' && this.botStatus.direction === 'SHORT_ONLY') return;
     if (action === 'SHORT' && this.botStatus.direction === 'LONG_ONLY') return;
 
-    const existing = this.positions.find(p => p.symbol === sym);
-    if (!existing && action !== 'HOLD' && this.balance >= this.botStatus.allocationUsdt) {
+    const activePos = this.getActivePositions();
+    const existing = activePos.find(p => p.symbol === sym);
+    const avail = this.getAccountSummary().availableBalance;
+    if (!existing && action !== 'HOLD' && avail >= this.botStatus.allocationUsdt) {
       const price = this.prices[sym] || ind.price;
       const lev = this.botStatus.leverage || 10;
       const tp = action === 'LONG'
@@ -1040,26 +1335,35 @@ class StandaloneTradingEngine {
         ? price * (1 - this.botStatus.stopLossPct / 100 / lev)
         : price * (1 + this.botStatus.stopLossPct / 100 / lev);
 
-      const pos = this.openPosition({
-        symbol: sym,
-        side: action,
-        amountUsdt: this.botStatus.allocationUsdt,
-        leverage: lev,
-        tp,
-        sl,
-        trailingStopPct: 2.0,
-        source: 'AUTO_BOT'
-      });
+      if (this.isLive) {
+        await this.executeLiveBinanceOrder({
+          symbol: sym,
+          side: action,
+          amountUsdt: this.botStatus.allocationUsdt,
+          leverage: lev
+        });
+      } else {
+        const pos = this.openPosition({
+          symbol: sym,
+          side: action,
+          amountUsdt: this.botStatus.allocationUsdt,
+          leverage: lev,
+          tp,
+          sl,
+          trailingStopPct: 2.0,
+          source: 'AUTO_BOT'
+        });
 
-      const log = {
-        id: `LOG-${Date.now()}`,
-        timestamp: new Date().toISOString(),
-        message: `⚡ Auto-Trade Executed: ${action} ${sym} @ $${price.toFixed(2)} | ${rationale}`,
-        type: 'ORDER',
-        data: pos
-      };
-      this.botStatus.recentLogs = [log, ...(this.botStatus.recentLogs || [])].slice(0, 50);
-      this.emit('bot_log', log);
+        const log = {
+          id: `LOG-${Date.now()}`,
+          timestamp: new Date().toISOString(),
+          message: `⚡ Auto-Trade Executed: ${action} ${sym} @ $${price.toFixed(2)} | ${rationale}`,
+          type: 'ORDER',
+          data: pos
+        };
+        this.botStatus.recentLogs = [log, ...(this.botStatus.recentLogs || [])].slice(0, 50);
+        this.emit('bot_log', log);
+      }
     }
   }
 
@@ -1095,9 +1399,14 @@ class StandaloneTradingEngine {
       };
     }
     if (path === '/api/account' && method === 'GET') {
+      if (this.isLive && this.apiKey && this.apiSecret) {
+        try {
+          await this.verifyAndLoadLiveAccount(this.apiKey, this.apiSecret);
+        } catch {}
+      }
       return {
         summary: this.getAccountSummary(),
-        positions: [...this.positions],
+        positions: [...this.getActivePositions()],
         history: [...this.orderHistory]
       };
     }
@@ -1113,38 +1422,43 @@ class StandaloneTradingEngine {
       return { success: true, summary };
     }
     if (path === '/api/account/mode' && method === 'POST') {
-      const savedKey = localStorage.getItem('binance_api_key');
-      if (body.isLive && !savedKey) {
-        throw { status: 400, data: { success: false, error: 'Please enter and save your Binance API Key & Secret Key in Settings first!' } };
+      const savedKey = localStorage.getItem('binance_api_key') || this.apiKey;
+      const savedSecret = localStorage.getItem('binance_api_secret') || this.apiSecret;
+      if (body.isLive) {
+        if (!savedKey || !savedSecret) {
+          throw { status: 400, data: { success: false, error: 'Please enter and verify your Binance API Key & Secret Key in Settings first!' } };
+        }
+        try {
+          const liveRes = await this.verifyAndLoadLiveAccount(savedKey, savedSecret);
+          return liveRes;
+        } catch (err) {
+          throw { status: 400, data: { success: false, error: err.message } };
+        }
       }
-      this.isLive = Boolean(body.isLive);
+      this.isLive = false;
+      const summary = this.getAccountSummary();
+      this.emit('account_summary', summary);
+      this.emit('positions_update', [...this.positions]);
       return {
         success: true,
-        isLive: this.isLive,
-        summary: this.getAccountSummary(),
+        isLive: false,
+        summary,
         positions: [...this.positions]
       };
     }
     if (path === '/api/account/api-keys' && method === 'POST') {
       const { apiKey, apiSecret } = body;
-      if (!apiKey || !apiSecret) {
-        this.isLive = false;
-        return {
-          success: true,
-          isLive: false,
-          message: 'Reverted to Paper Trading',
-          summary: this.getAccountSummary(),
-          positions: [...this.positions]
+      try {
+        return await this.verifyAndLoadLiveAccount(apiKey, apiSecret);
+      } catch (err) {
+        throw {
+          status: 400,
+          data: {
+            success: false,
+            error: err.message || 'Failed to authenticate with Binance Futures API.'
+          }
         };
       }
-      this.isLive = true;
-      return {
-        success: true,
-        isLive: true,
-        message: 'Binance API credentials saved in Standalone Mobile Engine!',
-        summary: this.getAccountSummary(),
-        positions: [...this.positions]
-      };
     }
     if (path === '/api/klines') {
       const symbol = u.searchParams.get('symbol') || 'BTCUSDT';
@@ -1207,14 +1521,40 @@ class StandaloneTradingEngine {
       };
     }
     if (path === '/api/order/open' && method === 'POST') {
+      if (this.isLive) {
+        const liveOrder = await this.executeLiveBinanceOrder(body);
+        return {
+          success: true,
+          liveOrder,
+          summary: this.getAccountSummary(),
+          positions: [...this.getActivePositions()]
+        };
+      }
       const position = this.openPosition(body);
       return { success: true, position, summary: this.getAccountSummary(), positions: [...this.positions] };
     }
     if (path === '/api/order/close' && method === 'POST') {
+      if (this.isLive || (body.positionId && String(body.positionId).startsWith('BINANCE-'))) {
+        const closed = await this.closeLiveBinancePosition(body.positionId);
+        return {
+          success: true,
+          closed,
+          summary: this.getAccountSummary(),
+          positions: [...this.getActivePositions()]
+        };
+      }
       const closed = this.closePosition(body.positionId, body.reason || 'MANUAL_CLOSE');
       return { success: true, closed, summary: this.getAccountSummary(), positions: [...this.positions] };
     }
     if (path === '/api/order/close-all' && method === 'POST') {
+      if (this.isLive) {
+        const ids = this.livePositions.map(p => p.id);
+        const closed = [];
+        for (const id of ids) {
+          closed.push(await this.closeLiveBinancePosition(id));
+        }
+        return { success: true, count: closed.length, closed };
+      }
       const ids = this.positions.map(p => p.id);
       const closed = ids.map(id => this.closePosition(id, 'PANIC_CLOSE_ALL'));
       return { success: true, count: closed.length, closed };
@@ -1282,10 +1622,19 @@ class StandaloneTradingEngine {
       const action = (body.action || 'LONG').toUpperCase();
       const sym = (body.symbol || 'BTCUSDT').toUpperCase();
       if (action === 'CLOSE') {
-        const p = this.positions.find(x => x.symbol === sym);
+        const p = this.getActivePositions().find(x => x.symbol === sym);
         if (!p) return { success: true, message: `No active position on ${sym}` };
-        const closed = this.closePosition(p.id, 'TRADINGVIEW_WEBHOOK_CLOSE');
+        const closed = this.isLive ? await this.closeLiveBinancePosition(p.id) : this.closePosition(p.id, 'TRADINGVIEW_WEBHOOK_CLOSE');
         return { success: true, position: closed };
+      }
+      if (this.isLive) {
+        const liveOrder = await this.executeLiveBinanceOrder({
+          symbol: sym,
+          side: action === 'SHORT' ? 'SHORT' : 'LONG',
+          amountUsdt: Number(body.amountUsdt || 250),
+          leverage: Number(body.leverage || 10)
+        });
+        return { success: true, liveOrder };
       }
       const pos = this.openPosition({
         symbol: sym,
@@ -1365,4 +1714,3 @@ class StandaloneTradingEngine {
 }
 
 export const standaloneEngine = new StandaloneTradingEngine();
-
