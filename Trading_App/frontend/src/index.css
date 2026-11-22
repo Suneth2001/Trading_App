@@ -267,6 +267,11 @@ html, body {
 }
 
 /* Animations */
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
 @keyframes pulseGlow {
   0%, 100% { opacity: 0.8; filter: drop-shadow(0 0 4px rgba(0, 245, 160, 0.5)); }
   50% { opacity: 1; filter: drop-shadow(0 0 12px rgba(0, 245, 160, 0.8)); }

@@ -79,8 +79,13 @@ export function App() {
   const [isTradingViewOpen, setIsTradingViewOpen] = useState(false);
   const [soundEnabled, setSoundEnabled] = useState(true);
   const [notification, setNotification] = useState(null);
+  const [pullDistance, setPullDistance] = useState(0);
+  const [isPullRefreshing, setIsPullRefreshing] = useState(false);
 
   const socketRef = useRef(null);
+  const touchStartYRef = useRef(0);
+  const touchStartXRef = useRef(0);
+  const isPullingRef = useRef(false);
 
   // Initialize Socket.io and fetch Initial State
   useEffect(() => {
@@ -362,16 +367,128 @@ export function App() {
 
   const handleRefreshAccount = async () => {
     try {
-      const res = await fetch('/api/account');
-      const d = await res.json();
+      const savedKey = localStorage.getItem('binance_api_key');
+      const savedSecret = localStorage.getItem('binance_api_secret');
+      const savedTestnet = localStorage.getItem('binance_use_testnet') === 'true';
+
+      if (savedKey && savedSecret) {
+        const keyRes = await fetch('/api/account/api-keys', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            apiKey: savedKey,
+            apiSecret: savedSecret,
+            useTestnet: savedTestnet
+          })
+        });
+        const keyData = await keyRes.json();
+        if (keyData && keyData.summary) setAccount(keyData.summary);
+        if (keyData && keyData.positions) setPositions(keyData.positions);
+      }
+
+      const tf = (timeframe || '15m').toLowerCase();
+      const [accRes, klineRes, indRes, scanRes] = await Promise.all([
+        fetch('/api/account'),
+        fetch(`/api/klines?symbol=${activeSymbol}&interval=${tf}&limit=100`),
+        fetch(`/api/indicators?symbol=${activeSymbol}&interval=${tf}`),
+        fetch('/api/market/analysis')
+      ]);
+
+      const d = await accRes.json();
       if (d.summary) setAccount(d.summary);
       if (d.positions) setPositions(d.positions);
       if (d.history) setHistory(d.history);
-      showNotification('Positions & Balance refreshed!', 'SUCCESS');
+
+      const kData = await klineRes.json();
+      if (Array.isArray(kData)) setCandles(kData);
+
+      const iData = await indRes.json();
+      if (iData) setIndicators(iData);
+
+      const sData = await scanRes.json();
+      if (Array.isArray(sData)) setMarketAnalysis(sData);
+
+      soundFX.playOrderPing();
+      showNotification('🔄 Live Binance Equity, Positions & Market Reloaded!', 'SUCCESS');
     } catch (e) {
       showNotification('Refresh failed: ' + e.message, 'DANGER');
     }
   };
+
+  // Mobile Pull-Down-to-Reload (Pull-to-Refresh) Gesture
+  useEffect(() => {
+    const onTouchStart = (e) => {
+      if (isSettingsOpen || isTradingViewOpen || isPullRefreshing) return;
+      if (window.scrollY > 8) return;
+      const touch = e.touches?.[0];
+      if (!touch) return;
+      touchStartYRef.current = touch.clientY;
+      touchStartXRef.current = touch.clientX;
+      isPullingRef.current = true;
+    };
+
+    const onTouchMove = (e) => {
+      if (!isPullingRef.current || isPullRefreshing) return;
+      if (window.scrollY > 8) {
+        isPullingRef.current = false;
+        setPullDistance(0);
+        return;
+      }
+      const touch = e.touches?.[0];
+      if (!touch) return;
+      const dy = touch.clientY - touchStartYRef.current;
+      const dx = Math.abs(touch.clientX - touchStartXRef.current);
+
+      // Ignore horizontal swipes (e.g. TickerTape or Chart pan)
+      if (dx > dy || dy <= 12) {
+        setPullDistance(0);
+        return;
+      }
+
+      const damped = Math.min(130, Math.round((dy - 12) * 0.55));
+      setPullDistance(damped);
+    };
+
+    const onTouchEnd = async () => {
+      if (!isPullingRef.current) return;
+      isPullingRef.current = false;
+
+      if (pullDistance >= 65) {
+        const shouldHardReload = pullDistance >= 115;
+        setIsPullRefreshing(true);
+        setPullDistance(65);
+        try {
+          if ('serviceWorker' in navigator) {
+            const regs = await navigator.serviceWorker.getRegistrations();
+            for (const r of regs) {
+              try { await r.update(); } catch {}
+            }
+          }
+          await handleRefreshAccount();
+          if (shouldHardReload) {
+            setTimeout(() => window.location.reload(), 350);
+            return;
+          }
+        } finally {
+          setTimeout(() => {
+            setIsPullRefreshing(false);
+            setPullDistance(0);
+          }, 500);
+        }
+      } else {
+        setPullDistance(0);
+      }
+    };
+
+    window.addEventListener('touchstart', onTouchStart, { passive: true });
+    window.addEventListener('touchmove', onTouchMove, { passive: true });
+    window.addEventListener('touchend', onTouchEnd);
+    return () => {
+      window.removeEventListener('touchstart', onTouchStart);
+      window.removeEventListener('touchmove', onTouchMove);
+      window.removeEventListener('touchend', onTouchEnd);
+    };
+  }, [pullDistance, isPullRefreshing, isSettingsOpen, isTradingViewOpen, activeSymbol, timeframe]);
 
   const handleClosePosition = async (positionId) => {
     try {
@@ -576,6 +693,52 @@ export function App() {
 
   return (
     <div className="app-container">
+      {/* Mobile Pull-Down-to-Reload Indicator */}
+      {(pullDistance > 0 || isPullRefreshing) && (
+        <div
+          style={{
+            position: 'fixed',
+            top: `${Math.min(72, pullDistance)}px`,
+            left: '50%',
+            transform: 'translate(-50%, -100%)',
+            zIndex: 120,
+            background: 'rgba(13, 19, 31, 0.96)',
+            border: `1px solid ${pullDistance >= 65 || isPullRefreshing ? '#00F5A0' : '#00D2FF'}`,
+            color: pullDistance >= 65 || isPullRefreshing ? '#00F5A0' : '#00D2FF',
+            padding: '8px 18px',
+            borderRadius: '999px',
+            fontSize: '12px',
+            fontWeight: 800,
+            display: 'flex',
+            alignItems: 'center',
+            gap: '8px',
+            boxShadow: '0 8px 25px rgba(0,0,0,0.75)',
+            transition: isPullRefreshing ? 'top 0.2s ease' : 'none',
+            pointerEvents: 'none'
+          }}
+        >
+          <span
+            style={{
+              display: 'inline-block',
+              fontSize: '14px',
+              transform: `rotate(${pullDistance * 3}deg)`,
+              animation: isPullRefreshing ? 'spin 0.8s linear infinite' : 'none'
+            }}
+          >
+            ↻
+          </span>
+          <span>
+            {isPullRefreshing
+              ? 'Reloading Live Binance Equity & Market...'
+              : pullDistance >= 115
+              ? 'Release for Full App Reload!'
+              : pullDistance >= 65
+              ? 'Release to Reload Live Data'
+              : 'Pull down to reload...'}
+          </span>
+        </div>
+      )}
+
       {/* Toast Notification Bar */}
       {notification && (
         <div style={{
@@ -612,6 +775,7 @@ export function App() {
         onPanicCloseAll={handlePanicCloseAll}
         onOpenSettings={() => setIsSettingsOpen(true)}
         onOpenTradingView={() => setIsTradingViewOpen(true)}
+        onRefresh={handleRefreshAccount}
       />
 
       {/* Quick Ticker Tape */}

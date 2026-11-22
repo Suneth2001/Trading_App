@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Zap, AlertTriangle, Settings, Radio, Download, Share, PlusSquare, X, Smartphone } from 'lucide-react';
+import { Zap, AlertTriangle, Settings, Radio, Download, Share, PlusSquare, X, Smartphone, RefreshCw } from 'lucide-react';
 
 export function Header({
   activeSymbol,
@@ -13,8 +13,10 @@ export function Header({
   onToggleLive,
   onPanicCloseAll,
   onOpenSettings,
-  onOpenTradingView
+  onOpenTradingView,
+  onRefresh
 }) {
+  const [isRefreshing, setIsRefreshing] = useState(false);
   const currentPrice = prices[activeSymbol] || 0;
   const stat = tickerStats[activeSymbol] || {};
   const changePct = stat.priceChangePercent !== undefined ? stat.priceChangePercent : 1.25;
@@ -248,22 +250,43 @@ export function Header({
             </span>
           </div>
 
-          {/* Account Equity Box */}
-          <div style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: '5px',
-            background: 'rgba(0, 245, 160, 0.06)',
-            padding: '3px 8px',
-            borderRadius: '6px',
-            border: '1px solid rgba(0, 245, 160, 0.22)'
-          }}>
+          {/* Account Equity Box (Tap to Reload) */}
+          <div
+            onClick={async () => {
+              if (!onRefresh || isRefreshing) return;
+              setIsRefreshing(true);
+              try {
+                await onRefresh();
+              } finally {
+                setTimeout(() => setIsRefreshing(false), 500);
+              }
+            }}
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: '5px',
+              background: 'rgba(0, 245, 160, 0.06)',
+              padding: '3px 8px',
+              borderRadius: '6px',
+              border: '1px solid rgba(0, 245, 160, 0.22)',
+              cursor: 'pointer'
+            }}
+            title="Tap or Pull Down to Reload Balance & Market"
+          >
             <span style={{ fontSize: '10px', color: 'var(--text-muted)', fontWeight: 600 }}>Equity:</span>
             <span className="mono" style={{ fontSize: '12px', fontWeight: 800, color: '#00F5A0' }}>
               ${account?.equity !== undefined && account?.equity !== null
                 ? Number(account.equity).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })
                 : (isLive ? '0.00' : '10,000.00')}
             </span>
+            <RefreshCw
+              size={11}
+              color="#00F5A0"
+              style={{
+                marginLeft: '2px',
+                animation: isRefreshing ? 'spin 0.8s linear infinite' : 'none'
+              }}
+            />
           </div>
         </div>
       </div>
