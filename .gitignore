@@ -1,0 +1,24 @@
+# Dependencies
+node_modules/
+**/node_modules/
+
+# Credentials & Secrets
+credentials.json
+**/credentials.json
+.env
+**/.env
+
+# Build caches & intermediate outputs
+Trading_App/frontend/android/.gradle/
+Trading_App/frontend/android/build/
+Trading_App/frontend/android/app/build/
+Trading_App/frontend/android/capacitor-cordova-android-plugins/build/
+Trading_App/frontend/android/local.properties
+Trading_App/frontend/ios/App/build/
+Trading_App/frontend/ios/App/Pods/
+Trading_App/frontend/dist/
+
+# OS & Editor files
+.DS_Store
+Thumbs.db
+*.log

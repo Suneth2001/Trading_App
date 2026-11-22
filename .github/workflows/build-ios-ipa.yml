@@ -1,0 +1,51 @@
+name: Build iOS IPA (Unsigned for Sideloadly / AltStore)
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build-ios-ipa:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Frontend Dependencies & Build Web Bundle
+        working-directory: Trading_App/frontend
+        run: |
+          npm install
+          npm run build
+          npx cap sync ios
+
+      - name: Build Unsigned iOS Archive with Xcode
+        working-directory: Trading_App/frontend/ios/App
+        run: |
+          xcodebuild -project App.xcodeproj \
+            -scheme App \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath build \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            clean build
+
+      - name: Package .app into ApexAlgo-iOS.ipa
+        working-directory: Trading_App/frontend/ios/App
+        run: |
+          mkdir -p Payload
+          cp -r build/Build/Products/Release-iphoneos/App.app Payload/
+          zip -r ApexAlgo-v1.0-iOS.ipa Payload
+
+      - name: Upload iOS .IPA Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ApexAlgo-v1.0-iOS-IPA
+          path: Trading_App/frontend/ios/App/ApexAlgo-v1.0-iOS.ipa

@@ -1,0 +1,596 @@
+import express from 'express';
+import http from 'http';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import { Server } from 'socket.io';
+import cors from 'cors';
+import { CONFIG } from './config.js';
+import { binanceService } from './services/binanceService.js';
+import { paperTrading } from './services/paperTradingService.js';
+import { MarginGuardian } from './services/marginGuardian.js';
+import { StrategyEngine } from './services/strategyEngine.js';
+import { TradingViewWebhookHandler } from './services/tradingViewWebhook.js';
+import { BacktestEngine } from './services/backtestEngine.js';
+import { aiPredictor } from './services/aiPredictorService.js';
+import { IndicatorService } from './services/indicatorService.js';
+import { MarketAnalysisService } from './services/marketAnalysisService.js';
+
+const app = express();
+const server = http.createServer(app);
+
+// Enable CORS for frontend development and mobile apps
+app.use(cors({ origin: '*' }));
+app.use(express.json());
+
+// Initialize Socket.io
+const io = new Server(server, {
+  cors: { origin: '*', methods: ['GET', 'POST'] }
+});
+
+// Initialize Services
+const marginGuardian = new MarginGuardian(io);
+const strategyEngine = new StrategyEngine(io);
+const tradingViewWebhook = new TradingViewWebhookHandler(io);
+const marketAnalysis = new MarketAnalysisService(io, marginGuardian);
+
+// Start Automated Market Scanner
+marketAnalysis.startScanner();
+
+// 1. WebSocket Tick Forwarding & Margin Guardian background check
+binanceService.initWebSocket((symbol, price, stats) => {
+  // Push live price to connected mobile/desktop clients
+  io.emit('price_tick', { symbol, price, stats });
+
+  // Update paper positions mark price in memory for Demo mode
+  if (!paperTrading.isLive) {
+    const currentPrices = binanceService.getCurrentPrices();
+    paperTrading.updateMarketPrices(currentPrices);
+    marginGuardian.evaluatePositions(paperTrading.positions, currentPrices);
+  }
+});
+
+// Helper to broadcast real live or paper account state
+const broadcastAccountState = async () => {
+  if (paperTrading.isLive) {
+    if (binanceService.liveExchange) {
+      try {
+        const liveBal = await binanceService.getLiveBalance();
+        const livePos = await binanceService.getLivePositions();
+        if (liveBal) io.emit('account_summary', liveBal);
+        if (livePos) io.emit('positions_update', livePos);
+        return { summary: liveBal, positions: livePos || [] };
+      } catch (e) {
+        console.warn('[Broadcast Live Error]', e.message);
+        return { summary: binanceService._cachedLiveBal, positions: binanceService._cachedLivePositions || [] };
+      }
+    }
+    return { summary: null, positions: [] };
+  }
+  const bal = paperTrading.getBalance();
+  io.emit('account_summary', bal);
+  io.emit('positions_update', paperTrading.positions);
+  return { summary: bal, positions: paperTrading.positions };
+};
+
+// Regular periodic balance & stats broadcast and 24/7 TP/SL/Margin Guardian auto-close check
+setInterval(async () => {
+  if (paperTrading.isLive && binanceService.liveExchange) {
+    try {
+      const livePositions = await binanceService.getLivePositions();
+      if (livePositions && livePositions.length > 0) {
+        await marginGuardian.evaluatePositions(livePositions, binanceService.getCurrentPrices(), true);
+      }
+    } catch (e) {
+      console.warn('[Margin Guardian Live Eval Error]', e.message);
+    }
+  } else if (paperTrading.positions.length > 0) {
+    const currentPrices = binanceService.getCurrentPrices();
+    paperTrading.updateMarketPrices(currentPrices);
+    await marginGuardian.evaluatePositions(paperTrading.positions, currentPrices, false);
+  }
+
+  await broadcastAccountState();
+}, 2500);
+
+// ======================== REST API ROUTES ======================== //
+
+// Health Check
+app.get('/api/health', (req, res) => {
+  res.json({
+    status: 'ONLINE',
+    serverTime: new Date().toISOString(),
+    uptime: process.uptime(),
+    botRunning: strategyEngine.isRunning,
+    openPositionsCount: paperTrading.positions.length
+  });
+});
+
+// Get Public IP for Binance API Whitelisting
+app.get('/api/my-ip', async (req, res) => {
+  try {
+    const ipRes = await fetch('https://api.ipify.org?format=json');
+    const data = await ipRes.json();
+    res.json({ ip: data.ip || '112.134.246.225' });
+  } catch {
+    res.json({ ip: '112.134.246.225' });
+  }
+});
+
+// System Configuration & Strategies
+app.get('/api/config', (req, res) => {
+  res.json({
+    pairs: CONFIG.DEFAULT_PAIRS,
+    strategies: CONFIG.STRATEGIES,
+    defaultLeverage: CONFIG.DEFAULT_LEVERAGE,
+    maxLeverage: CONFIG.MAX_LEVERAGE,
+    tradingViewWebhookUrl: `${req.protocol}://${req.get('host')}${CONFIG.TRADINGVIEW.WEBHOOK_PATH}`
+  });
+});
+
+// Account Status (Balance, Positions, Orders)
+app.get('/api/account', async (req, res) => {
+  if (paperTrading.isLive && binanceService.liveExchange) {
+    try {
+      const liveBal = await binanceService.getLiveBalance();
+      const livePos = await binanceService.getLivePositions();
+      if (liveBal) {
+        return res.json({
+          summary: liveBal,
+          positions: livePos || [],
+          history: paperTrading.orderHistory
+        });
+      }
+    } catch (e) {
+      console.warn('[Account API] Live fetch error:', e.message);
+    }
+  }
+
+  res.json({
+    summary: paperTrading.getBalance(),
+    positions: paperTrading.positions,
+    history: paperTrading.orderHistory
+  });
+});
+
+// Reset Account Demo Balance
+app.post('/api/account/reset', (req, res) => {
+  const { balance } = req.body;
+  const result = paperTrading.resetAccount(balance || CONFIG.PAPER_TRADING_DEFAULT_BALANCE);
+  io.emit('account_summary', result);
+  io.emit('positions_update', []);
+  res.json({ success: true, summary: result });
+});
+
+// Toggle Paper vs Live
+app.post('/api/account/mode', async (req, res) => {
+  const { isLive } = req.body;
+  if (isLive && !binanceService.liveExchange) {
+    return res.status(400).json({
+      success: false,
+      error: 'Please enter and verify your Binance API Key & Secret Key in Settings first!'
+    });
+  }
+  const result = paperTrading.setLiveMode(isLive);
+
+  if (isLive && binanceService.liveExchange) {
+    const liveBal = await binanceService.getLiveBalance();
+    const livePos = await binanceService.getLivePositions();
+    if (liveBal) {
+      io.emit('account_summary', liveBal);
+      io.emit('positions_update', livePos);
+      return res.json({ success: true, ...result, summary: liveBal, positions: livePos });
+    }
+  }
+
+  io.emit('account_summary', paperTrading.getBalance());
+  io.emit('positions_update', paperTrading.positions);
+  res.json({ success: true, ...result, summary: paperTrading.getBalance(), positions: paperTrading.positions });
+});
+
+// Configure Live Binance API Credentials
+app.post('/api/account/api-keys', async (req, res) => {
+  try {
+    const { apiKey, apiSecret, useTestnet } = req.body;
+    const result = await binanceService.setApiCredentials({ apiKey, apiSecret, useTestnet });
+    
+    if (result.success && binanceService.liveExchange) {
+      paperTrading.setLiveMode(true);
+      const liveBal = await binanceService.getLiveBalance();
+      const livePos = await binanceService.getLivePositions();
+      if (liveBal) {
+        io.emit('account_summary', liveBal);
+      }
+      if (livePos) {
+        io.emit('positions_update', livePos);
+      }
+      return res.json({ ...result, isLive: true, summary: liveBal, positions: livePos });
+    } else if (result.success && (!apiKey || !apiSecret)) {
+      paperTrading.setLiveMode(false);
+      const demoBal = paperTrading.getBalance();
+      io.emit('account_summary', demoBal);
+      io.emit('positions_update', paperTrading.positions);
+      return res.json({ ...result, isLive: false, summary: demoBal, positions: paperTrading.positions });
+    }
+    
+    return res.status(400).json(result);
+  } catch (err) {
+    return res.status(500).json({ success: false, error: err.message || 'Server error setting API credentials' });
+  }
+});
+
+// Market Prices & Ticker Stats
+app.get('/api/prices', async (req, res) => {
+  const stats = await binanceService.fetchTickerStats();
+  res.json({
+    prices: binanceService.getCurrentPrices(),
+    stats
+  });
+});
+
+// Candlestick Data
+app.get('/api/klines', async (req, res) => {
+  let { symbol = 'BTCUSDT', interval = '15m', limit = 100 } = req.query;
+  const normInterval = (interval || '15m').toLowerCase();
+  const candles = await binanceService.fetchKlines(symbol, normInterval, parseInt(limit));
+  res.json(candles);
+});
+
+// Live Technical Indicators for Symbol
+app.get('/api/indicators', async (req, res) => {
+  let { symbol = 'BTCUSDT', interval = '15m' } = req.query;
+  const normInterval = (interval || '15m').toLowerCase();
+  const candles = await binanceService.fetchKlines(symbol, normInterval, 60);
+  const indicators = IndicatorService.calculateAll(candles);
+  res.json(indicators || {});
+});
+
+// Open Position (Long or Short)
+app.post('/api/order/open', async (req, res) => {
+  try {
+    const { symbol, side, amountUsdt, leverage, tp, sl, trailingStopPct } = req.body;
+    const markPrice = binanceService.getPrice(symbol);
+
+    if (!markPrice || markPrice <= 0) {
+      return res.status(400).json({ error: `Price unavailable for ${symbol}` });
+    }
+
+    let liveOrder = null;
+    if (paperTrading.isLive) {
+      try {
+        liveOrder = await binanceService.executeLiveOrder({
+          symbol,
+          side,
+          amountUsdt: Number(amountUsdt),
+          leverage: Number(leverage || CONFIG.DEFAULT_LEVERAGE)
+        });
+      } catch (liveErr) {
+        return res.status(400).json({ error: `Binance Live Order Error: ${liveErr.message}` });
+      }
+    }
+
+    const position = paperTrading.openPosition({
+      symbol,
+      side,
+      amountUsdt: Number(amountUsdt),
+      leverage: Number(leverage || CONFIG.DEFAULT_LEVERAGE),
+      markPrice,
+      tp,
+      sl,
+      trailingStopPct,
+      source: paperTrading.isLive ? 'BINANCE_LIVE' : 'MANUAL'
+    });
+
+    if (liveOrder) {
+      position.binanceOrderId = liveOrder.id;
+    }
+
+    // Register TP, SL and trailing stop targets with Margin Guardian for 24/7 auto-close
+    if (tp || sl) {
+      marginGuardian.setTarget(position.id, { tp, sl, trailingStopPct });
+      marginGuardian.setTarget(symbol, { tp, sl, trailingStopPct });
+      if (paperTrading.isLive) {
+        const cleanSym = symbol.replace('/', '').toUpperCase();
+        marginGuardian.setTarget(`BINANCE-${cleanSym}-${side}`, { tp, sl, trailingStopPct });
+      }
+    }
+
+    io.emit('position_opened', position);
+    const state = await broadcastAccountState();
+
+    res.json({ success: true, position, liveOrder, summary: state?.summary, positions: state?.positions });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// Close Single Position
+app.post('/api/order/close', async (req, res) => {
+  try {
+    const { positionId, reason = 'MANUAL_CLOSE' } = req.body;
+
+    // 1. Check if it is a Live Binance Position
+    if (positionId && (positionId.startsWith('BINANCE-') || paperTrading.isLive)) {
+      const livePositions = await binanceService.getLivePositions();
+      const livePos = livePositions.find(p => p.id === positionId || p.symbol === positionId);
+      if (livePos) {
+        await binanceService.closeLivePosition({
+          symbol: livePos.symbol,
+          side: livePos.side,
+          size: livePos.size
+        });
+        binanceService._cachedLivePositions = null;
+        binanceService._lastPosTime = 0;
+        binanceService._cachedLiveBal = null;
+        binanceService._lastBalTime = 0;
+        io.emit('position_closed', { id: positionId, symbol: livePos.symbol, side: livePos.side, reason });
+        await broadcastAccountState();
+        return res.json({ success: true, closed: livePos });
+      }
+    }
+
+    // 2. Paper Trading Position
+    const pos = paperTrading.positions.find(p => p.id === positionId);
+    if (!pos) {
+      return res.status(404).json({ error: 'Position not found' });
+    }
+
+    const currentPrice = binanceService.getPrice(pos.symbol) || pos.currentPrice;
+    const closed = paperTrading.closePosition(positionId, currentPrice, reason);
+
+    io.emit('position_closed', closed);
+    await broadcastAccountState();
+
+    res.json({ success: true, closed });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// Panic Close All Positions
+app.post('/api/order/close-all', async (req, res) => {
+  try {
+    if (paperTrading.isLive && binanceService.liveExchange) {
+      const livePositions = await binanceService.getLivePositions();
+      for (const pos of livePositions) {
+        await binanceService.closeLivePosition({
+          symbol: pos.symbol,
+          side: pos.side,
+          size: pos.size
+        });
+      }
+      binanceService._cachedLivePositions = null;
+      binanceService._lastPosTime = 0;
+      binanceService._cachedLiveBal = null;
+      binanceService._lastBalTime = 0;
+    }
+    const closed = paperTrading.closeAllPositions(binanceService.getCurrentPrices(), 'PANIC_CLOSE_ALL');
+    await broadcastAccountState();
+    res.json({ success: true, count: closed.length, closed });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Auto-Trading Bot Endpoints
+app.get('/api/bot/status', (req, res) => {
+  res.json(strategyEngine.getStatus());
+});
+
+app.post('/api/bot/config', (req, res) => {
+  const updated = strategyEngine.updateConfig(req.body);
+  res.json(updated);
+});
+
+app.post('/api/bot/start', (req, res) => {
+  const status = strategyEngine.start();
+  res.json(status);
+});
+
+app.post('/api/bot/stop', (req, res) => {
+  const status = strategyEngine.stop();
+  res.json(status);
+});
+
+// Margin Guardian Settings & Emergency Logs
+app.get('/api/guardian/settings', (req, res) => {
+  res.json(marginGuardian.getSettings());
+});
+
+app.post('/api/guardian/settings', (req, res) => {
+  const updated = marginGuardian.setSettings(req.body);
+  res.json(updated);
+});
+
+// TradingView Webhook Endpoint
+app.post(CONFIG.TRADINGVIEW.WEBHOOK_PATH, async (req, res) => {
+  const result = await tradingViewWebhook.processAlert(req.body);
+  if (!result.success) {
+    return res.status(result.code || 400).json(result);
+  }
+  res.json(result);
+});
+
+app.get('/api/webhook/logs', (req, res) => {
+  res.json({
+    secret: tradingViewWebhook.getSecret(),
+    logs: tradingViewWebhook.getLogs(),
+    webhookUrl: `${req.protocol}://${req.get('host')}${CONFIG.TRADINGVIEW.WEBHOOK_PATH}`
+  });
+});
+
+app.post('/api/webhook/secret', (req, res) => {
+  const { secret } = req.body;
+  const updated = tradingViewWebhook.setSecret(secret);
+  res.json({ success: true, secret: updated });
+});
+
+// Quantitative Backtester Endpoint
+app.post('/api/backtest/run', async (req, res) => {
+  try {
+    const result = await BacktestEngine.run(req.body);
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// AI & Market Sentiment Analysis
+app.get('/api/ai/analysis', async (req, res) => {
+  try {
+    const { symbol = 'BTCUSDT', timeframe = '15m' } = req.query;
+    const analysis = await aiPredictor.analyzeSymbol(symbol, timeframe);
+    res.json(analysis);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Auto Market Analysis Endpoint (Scans & Ranks All Coins)
+app.get('/api/market/analysis', async (req, res) => {
+  try {
+    const analysis = await marketAnalysis.runFullScan();
+    res.json(analysis);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Live Order Book Depth (Bids, Asks, Buyer vs Seller Pressure)
+app.get('/api/market/orderbook', async (req, res) => {
+  try {
+    const { symbol = 'BTCUSDT', limit = 15 } = req.query;
+    const depth = await binanceService.fetchOrderBook(symbol, parseInt(limit));
+    res.json(depth);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// AI Auto-Pilot Endpoints
+app.get('/api/autopilot/status', (req, res) => {
+  res.json(marketAnalysis.getAutoPilotStatus());
+});
+
+app.post('/api/autopilot/start', (req, res) => {
+  const status = marketAnalysis.startAutoPilot();
+  res.json(status);
+});
+
+app.post('/api/autopilot/stop', (req, res) => {
+  const status = marketAnalysis.stopAutoPilot();
+  res.json(status);
+});
+
+app.post('/api/autopilot/config', (req, res) => {
+  const status = marketAnalysis.updateAutoPilotConfig(req.body);
+  res.json(status);
+});
+
+// Socket.io Connection Handler
+io.on('connection', async (socket) => {
+  // Send initial snapshot on client connect
+  if (paperTrading.isLive && binanceService.liveExchange) {
+    try {
+      const liveBal = await binanceService.getLiveBalance();
+      const livePos = await binanceService.getLivePositions();
+      socket.emit('account_summary', liveBal || paperTrading.getBalance());
+      socket.emit('positions_update', livePos || []);
+    } catch {
+      socket.emit('account_summary', paperTrading.getBalance());
+      socket.emit('positions_update', paperTrading.positions);
+    }
+  } else {
+    socket.emit('account_summary', paperTrading.getBalance());
+    socket.emit('positions_update', paperTrading.positions);
+  }
+  socket.emit('bot_status', strategyEngine.getStatus());
+  socket.emit('guardian_settings', marginGuardian.getSettings());
+  socket.emit('market_analysis_update', marketAnalysis.getLatestAnalysis());
+  socket.emit('autopilot_status', marketAnalysis.getAutoPilotStatus());
+});
+
+// Serve built frontend static assets so port 5000 also hosts the full web UI
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const frontendDist = path.resolve(__dirname, '../../frontend/dist');
+app.use(express.static(frontendDist));
+
+// Generate & serve Apple iOS WebClip Configuration Profile (.mobileconfig) for 1-Tap iPhone Installation
+app.get('/ApexAlgo-iPhone.mobileconfig', (req, res) => {
+  const hostUrl = `${req.protocol}://${req.get('host')}/`;
+  const mobileConfigXml = `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>PayloadContent</key>
+  <array>
+    <dict>
+      <key>FullScreen</key>
+      <true/>
+      <key>IsRemovable</key>
+      <true/>
+      <key>Label</key>
+      <string>ApexAlgo Pro</string>
+      <key>PayloadDescription</key>
+      <string>Installs ApexAlgo Pro Full-Screen Crypto Auto-Trading App on iPhone</string>
+      <key>PayloadDisplayName</key>
+      <string>ApexAlgo Pro iOS App</string>
+      <key>PayloadIdentifier</key>
+      <string>com.apexalgo.terminal.webclip</string>
+      <key>PayloadType</key>
+      <string>com.apple.webClip.managed</string>
+      <key>PayloadUUID</key>
+      <string>A1B2C3D4-E5F6-4789-9012-3456789ABCDE</string>
+      <key>PayloadVersion</key>
+      <integer>1</integer>
+      <key>Precomposed</key>
+      <true/>
+      <key>URL</key>
+      <string>${hostUrl}</string>
+    </dict>
+  </array>
+  <key>PayloadDescription</key>
+  <string>ApexAlgo Pro - Next-Gen Crypto Auto-Trading Terminal for iPhone (iOS)</string>
+  <key>PayloadDisplayName</key>
+  <string>ApexAlgo Pro (iPhone App Installer)</string>
+  <key>PayloadIdentifier</key>
+  <string>com.apexalgo.terminal.profile</string>
+  <key>PayloadOrganization</key>
+  <string>ApexAlgo Pro</string>
+  <key>PayloadRemovalDisallowed</key>
+  <false/>
+  <key>PayloadType</key>
+  <string>Configuration</string>
+  <key>PayloadUUID</key>
+  <string>F1E2D3C4-B5A6-4789-9012-3456789ABCDE</string>
+  <key>PayloadVersion</key>
+  <integer>1</integer>
+</dict>
+</plist>`;
+  res.setHeader('Content-Type', 'application/x-apple-aspen-config');
+  res.setHeader('Content-Disposition', 'attachment; filename="ApexAlgo-iPhone.mobileconfig"');
+  res.send(mobileConfigXml);
+});
+
+// Start Server
+server.listen(CONFIG.PORT, () => {
+  console.log(`================================================================`);
+  console.log(`  CRYPTO AUTO-TRADING ENGINE BACKEND RUNNING ON PORT ${CONFIG.PORT} `);
+  console.log(`  TRADINGVIEW WEBHOOK URL: http://localhost:${CONFIG.PORT}${CONFIG.TRADINGVIEW.WEBHOOK_PATH}`);
+  console.log(`  MARGIN GUARDIAN: ACTIVE (Auto-Close at ${CONFIG.MARGIN_GUARDIAN.DEFAULT_CRITICAL_MARGIN_RATIO}% Margin)`);
+  console.log(`================================================================`);
+
+  // Auto-restore saved live Binance credentials on startup
+  (async () => {
+    try {
+      const credsResult = await binanceService.loadSavedCredentials();
+      if (credsResult && credsResult.success && binanceService.liveExchange) {
+        paperTrading.setLiveMode(true);
+        console.log(`[Binance] Live Trading Mode restored on boot! (${credsResult.message})`);
+        await broadcastAccountState();
+      }
+    } catch (err) {
+      console.warn('[Binance] Startup credentials load failed:', err.message);
+    }
+  })();
+});

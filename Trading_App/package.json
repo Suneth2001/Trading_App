@@ -1,0 +1,11 @@
+{
+  "name": "apexalgo-auto-trading-terminal",
+  "version": "1.0.0",
+  "description": "Next-Gen Binance & TradingView Algorithmic Crypto Auto-Trading Terminal with Margin Guardian Auto-Close for Desktop, iPhone & Android",
+  "scripts": {
+    "start:backend": "npm --prefix backend start",
+    "dev:backend": "npm --prefix backend run dev",
+    "dev:frontend": "npm --prefix frontend run dev",
+    "build:frontend": "npm --prefix frontend run build"
+  }
+}

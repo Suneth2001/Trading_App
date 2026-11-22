@@ -1,0 +1,15 @@
+{
+  "name": "trading-app-workspace",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Root workspace runner for ApexAlgo Trading App",
+  "scripts": {
+    "dev": "npm --prefix Trading_App/frontend run dev",
+    "dev:frontend": "npm --prefix Trading_App/frontend run dev",
+    "dev:backend": "npm --prefix Trading_App/backend run dev",
+    "start:backend": "npm --prefix Trading_App/backend start",
+    "build:frontend": "npm --prefix Trading_App/frontend run build",
+    "build:apk": "npm --prefix Trading_App/frontend run build:apk",
+    "install:all": "npm --prefix Trading_App/backend install && npm --prefix Trading_App/frontend install"
+  }
+}

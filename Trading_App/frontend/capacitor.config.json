@@ -1,0 +1,12 @@
+{
+  "appId": "com.apexalgo.terminal",
+  "appName": "ApexAlgo",
+  "webDir": "dist",
+  "server": {
+    "cleartext": true,
+    "androidScheme": "https"
+  },
+  "android": {
+    "allowMixedContent": true
+  }
+}

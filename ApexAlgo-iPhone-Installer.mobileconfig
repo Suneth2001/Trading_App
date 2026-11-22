@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>PayloadContent</key>
+  <array>
+    <dict>
+      <key>FullScreen</key>
+      <true/>
+      <key>IsRemovable</key>
+      <true/>
+      <key>Label</key>
+      <string>ApexAlgo Pro</string>
+      <key>PayloadDescription</key>
+      <string>Installs ApexAlgo Pro Full-Screen Crypto Auto-Trading App on iPhone</string>
+      <key>PayloadDisplayName</key>
+      <string>ApexAlgo Pro iOS App</string>
+      <key>PayloadIdentifier</key>
+      <string>com.apexalgo.terminal.webclip</string>
+      <key>PayloadType</key>
+      <string>com.apple.webClip.managed</string>
+      <key>PayloadUUID</key>
+      <string>A1B2C3D4-E5F6-4789-9012-3456789ABCDE</string>
+      <key>PayloadVersion</key>
+      <integer>1</integer>
+      <key>Precomposed</key>
+      <true/>
+      <key>URL</key>
+      <string>http://192.168.1.4:5000/</string>
+    </dict>
+  </array>
+  <key>PayloadDescription</key>
+  <string>ApexAlgo Pro - Next-Gen Crypto Auto-Trading Terminal for iPhone (iOS)</string>
+  <key>PayloadDisplayName</key>
+  <string>ApexAlgo Pro (iPhone App Installer)</string>
+  <key>PayloadIdentifier</key>
+  <string>com.apexalgo.terminal.profile</string>
+  <key>PayloadOrganization</key>
+  <string>ApexAlgo Pro</string>
+  <key>PayloadRemovalDisallowed</key>
+  <false/>
+  <key>PayloadType</key>
+  <string>Configuration</string>
+  <key>PayloadUUID</key>
+  <string>F1E2D3C4-B5A6-4789-9012-3456789ABCDE</string>
+  <key>PayloadVersion</key>
+  <integer>1</integer>
+</dict>
+</plist>

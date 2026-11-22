@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#080B10"/>
+      <stop offset="100%" stop-color="#141B2D"/>
+    </linearGradient>
+    <linearGradient id="neon" x1="0%" y1="100%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#00F5A0"/>
+      <stop offset="50%" stop-color="#00D2FF"/>
+      <stop offset="100%" stop-color="#9D4EDD"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="128" fill="url(#bg)"/>
+  <rect x="16" y="16" width="480" height="480" rx="112" fill="none" stroke="url(#neon)" stroke-width="4" opacity="0.6"/>
+  <!-- Candle 1 -->
+  <line x1="160" y1="180" x2="160" y2="340" stroke="#00F5A0" stroke-width="6"/>
+  <rect x="144" y="220" width="32" height="80" rx="6" fill="#00F5A0"/>
+  <!-- Candle 2 -->
+  <line x1="256" y1="120" x2="256" y2="400" stroke="#00D2FF" stroke-width="6"/>
+  <rect x="238" y="160" width="36" height="180" rx="6" fill="#00D2FF"/>
+  <!-- Candle 3 -->
+  <line x1="352" y1="150" x2="352" y2="360" stroke="#9D4EDD" stroke-width="6"/>
+  <rect x="336" y="190" width="32" height="120" rx="6" fill="#9D4EDD"/>
+  <!-- Algorithmic Bolt Overlay -->
+  <path d="M280 80 L180 260 L260 260 L230 430 L350 240 L270 240 Z" fill="url(#neon)" opacity="0.9"/>
+</svg>
