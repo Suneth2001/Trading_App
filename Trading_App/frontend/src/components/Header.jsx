@@ -1,5 +1,5 @@
-import React from 'react';
-import { Zap, AlertTriangle, Settings, Radio } from 'lucide-react';
+import React, { useState } from 'react';
+import { Zap, AlertTriangle, Settings, Radio, Download, Share, PlusSquare, X, Smartphone } from 'lucide-react';
 
 export function Header({
   activeSymbol,
@@ -19,6 +19,12 @@ export function Header({
   const stat = tickerStats[activeSymbol] || {};
   const changePct = stat.priceChangePercent !== undefined ? stat.priceChangePercent : 1.25;
   const isPositive = changePct >= 0;
+  const [showInstallModal, setShowInstallModal] = useState(false);
+  const isStandalone = typeof window !== 'undefined' && (
+    window.navigator?.standalone === true ||
+    window.matchMedia?.('(display-mode: standalone)')?.matches ||
+    window.Capacitor?.isNativePlatform?.()
+  );
 
   return (
     <header className="app-header">
@@ -83,8 +89,31 @@ export function Header({
           </button>
         </div>
 
-        {/* Right Action Controls: Webhook, Panic, Settings (Always visible on Mobile & Desktop) */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexShrink: 0 }}>
+        {/* Right Action Controls: Install App, Webhook, Panic, Settings */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: '5px', flexShrink: 0 }}>
+          {!isStandalone && (
+            <button
+              onClick={() => setShowInstallModal(true)}
+              style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: '4px',
+                background: 'rgba(168, 85, 247, 0.18)',
+                border: '1px solid rgba(168, 85, 247, 0.5)',
+                color: '#C084FC',
+                padding: '6px 8px',
+                borderRadius: '7px',
+                fontSize: '10.5px',
+                fontWeight: 800,
+                cursor: 'pointer'
+              }}
+              title="Save / Install as Mobile App on iPhone or Android"
+            >
+              <Download size={13} color="#C084FC" />
+              <span>App</span>
+            </button>
+          )}
           {/* TradingView Webhook Button */}
           <button
             onClick={onOpenTradingView}
@@ -238,6 +267,106 @@ export function Header({
           </div>
         </div>
       </div>
+
+      {/* Save / Install as App Modal for iPhone & Android */}
+      {showInstallModal && (
+        <div
+          onClick={() => setShowInstallModal(false)}
+          style={{
+            position: 'fixed',
+            inset: 0,
+            background: 'rgba(0,0,0,0.82)',
+            backdropFilter: 'blur(8px)',
+            WebkitBackdropFilter: 'blur(8px)',
+            zIndex: 200,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            padding: '16px'
+          }}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="glass-panel"
+            style={{
+              width: '100%',
+              maxWidth: '420px',
+              padding: '20px',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: '14px',
+              background: '#0D131F',
+              border: '1px solid rgba(0, 245, 160, 0.35)'
+            }}
+          >
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontWeight: 800, fontSize: '16px', color: '#FFFFFF' }}>
+                <Smartphone size={18} color="#00F5A0" />
+                <span>Install ApexAlgo Pro App</span>
+              </div>
+              <button
+                onClick={() => setShowInstallModal(false)}
+                style={{ background: 'transparent', border: 'none', color: '#94A3B8', cursor: 'pointer' }}
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            {/* Option 1: 1-Tap iOS Configuration Profile Download */}
+            <div style={{
+              background: 'rgba(0, 245, 160, 0.07)',
+              border: '1px solid rgba(0, 245, 160, 0.3)',
+              borderRadius: '10px',
+              padding: '14px',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: '8px'
+            }}>
+              <div style={{ fontWeight: 800, fontSize: '13px', color: '#00F5A0' }}>
+                🍏 Option 1: Direct iPhone App Profile Download
+              </div>
+              <div style={{ fontSize: '11.5px', color: '#CBD5E1', lineHeight: '1.45' }}>
+                Tap below to download the iPhone App Installer, then open <strong>iPhone Settings → Profile Downloaded → Install</strong>.
+              </div>
+              <a
+                href="./ApexAlgo-iPhone.mobileconfig"
+                download="ApexAlgo-iPhone.mobileconfig"
+                className="btn btn-primary"
+                style={{ textDecoration: 'none', width: '100%', padding: '10px', fontSize: '12.5px', fontWeight: 800 }}
+              >
+                <Download size={15} />
+                <span>Download iPhone App Installer</span>
+              </a>
+            </div>
+
+            {/* Option 2: Safari Add to Home Screen */}
+            <div style={{
+              background: 'rgba(0, 210, 255, 0.06)',
+              border: '1px solid rgba(0, 210, 255, 0.25)',
+              borderRadius: '10px',
+              padding: '14px',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: '8px',
+              fontSize: '12px',
+              color: '#E2E8F0',
+              lineHeight: '1.5'
+            }}>
+              <div style={{ fontWeight: 800, fontSize: '13px', color: '#00D2FF' }}>
+                📲 Option 2: Safari "Add to Home Screen" (Instant)
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <Share size={15} color="#00D2FF" />
+                <span>1. Tap the <strong>Share</strong> icon at the bottom of Safari.</span>
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <PlusSquare size={15} color="#00F5A0" />
+                <span>2. Select <strong>"Add to Home Screen"</strong> and tap <strong>Add</strong>.</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </header>
   );
 }
