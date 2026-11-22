@@ -1,9 +1,19 @@
 /**
  * API Configuration & Multi-Platform Server Resolver
- * Supports Desktop Web, Mobile Browser, and Android Capacitor APK with
- * automatic fallback to the Embedded Standalone Trading Engine.
+ * Supports Desktop Web, GitHub Pages / Cloud PWA (iPhone & Android), and Android/iOS Capacitor Apps
+ * with automatic zero-delay fallback to the Embedded Standalone Trading Engine.
  */
 import { standaloneEngine } from './standaloneEngine.js';
+
+export function isStaticCloudHost() {
+  const host = window.location.hostname || '';
+  return (
+    host.endsWith('github.io') ||
+    host.endsWith('netlify.app') ||
+    host.endsWith('vercel.app') ||
+    host.endsWith('pages.dev')
+  );
+}
 
 export function isNativeApp() {
   return Boolean(
@@ -19,8 +29,13 @@ export function getServerUrl() {
     return saved.trim().replace(/\/+$/, '');
   }
 
+  if (isStaticCloudHost()) {
+    // On GitHub Pages / Cloud PWA, use Embedded Standalone Engine by default
+    return '';
+  }
+
   if (isNativeApp()) {
-    // Default LAN backend IP for Android APK
+    // Default LAN backend IP for Android/iOS native app
     return 'http://192.168.1.4:5000';
   }
 
@@ -43,37 +58,43 @@ export function getSocketUrl() {
 
 /**
  * Global fetch interceptor:
- * 1. Routes /api calls to the configured backend server if reachable.
- * 2. Automatically falls back to the in-app Standalone Trading Engine if the
- *    PC backend server is offline or unreachable (e.g. Android APK on mobile data).
+ * 1. Routes /api calls to the configured backend server if reachable and returning JSON.
+ * 2. Automatically falls back to the in-app Standalone Trading Engine if running on
+ *    GitHub Pages (iPhone PWA) or when the PC backend server is offline.
  */
 export function setupApiInterceptor() {
   if (window._nativeFetch) return;
   const originalFetch = window.fetch.bind(window);
   window._nativeFetch = originalFetch;
 
-  let backendReachable = !isNativeApp();
+  const hasSavedServer = Boolean(localStorage.getItem('apex_server_url')?.trim());
+  let backendReachable = !isNativeApp() && (!isStaticCloudHost() || hasSavedServer);
   let lastCheckTime = 0;
 
   window.fetch = async function (input, init) {
     if (typeof input === 'string' && input.startsWith('/api')) {
       const serverUrl = getServerUrl();
       const fullUrl = serverUrl ? `${serverUrl}${input}` : input;
+      const onStaticHostWithoutServer = isStaticCloudHost() && !serverUrl;
 
-      // Try external backend if recently reachable or due for a retry check
       const now = Date.now();
-      if (backendReachable || now - lastCheckTime > 12000) {
+      if (!onStaticHostWithoutServer && (backendReachable || now - lastCheckTime > 12000)) {
         lastCheckTime = now;
         try {
           const controller = new AbortController();
-          const timer = setTimeout(() => controller.abort(), isNativeApp() ? 2200 : 6000);
+          const timer = setTimeout(() => controller.abort(), isNativeApp() ? 2200 : 5000);
           const res = await originalFetch(fullUrl, {
             ...init,
             signal: controller.signal
           });
           clearTimeout(timer);
-          backendReachable = true;
-          return res;
+
+          const contentType = res.headers.get('content-type') || '';
+          if (res.status !== 404 && contentType.includes('application/json')) {
+            backendReachable = true;
+            return res;
+          }
+          backendReachable = false;
         } catch {
           backendReachable = false;
         }

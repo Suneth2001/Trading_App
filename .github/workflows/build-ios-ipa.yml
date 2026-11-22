@@ -1,11 +1,38 @@
-name: Build iOS IPA (Unsigned for Sideloadly / AltStore)
+name: Deploy iPhone Web App (GitHub Pages) & Build iOS IPA
 
 on:
   push:
     branches: [ main, master ]
   workflow_dispatch:
 
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
 jobs:
+  deploy-iphone-webapp:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install & Build Frontend with Embedded Standalone Engine
+        working-directory: Trading_App/frontend
+        run: |
+          npm install
+          npm run build
+
+      - name: Upload Pages Artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: Trading_App/frontend/dist
+
   build-ios-ipa:
     runs-on: macos-latest
     steps:
@@ -17,14 +44,14 @@ jobs:
         with:
           node-version: '20'
 
-      - name: Install Frontend Dependencies & Build Web Bundle
+      - name: Install Frontend Dependencies & Sync iOS
         working-directory: Trading_App/frontend
         run: |
           npm install
           npm run build
-          npx cap sync ios
+          npx cap copy ios
 
-      - name: Build Unsigned iOS Archive with Xcode
+      - name: Build Unsigned iOS App with Xcode
         working-directory: Trading_App/frontend/ios/App
         run: |
           xcodebuild -project App.xcodeproj \
@@ -37,7 +64,7 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             clean build
 
-      - name: Package .app into ApexAlgo-iOS.ipa
+      - name: Package .app into ApexAlgo-v1.0-iOS.ipa
         working-directory: Trading_App/frontend/ios/App
         run: |
           mkdir -p Payload

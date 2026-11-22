@@ -2,6 +2,7 @@ import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 
 export default defineConfig({
+  base: './',
   resolve: {
     preserveSymlinks: true
   },
@@ -13,7 +14,7 @@ export default defineConfig({
   },
   server: {
     port: 5173,
-    host: true, // Allow access from local network for mobile phone testing
+    host: true,
     proxy: {
       '/api': {
         target: 'http://localhost:5000',

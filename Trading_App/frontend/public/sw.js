@@ -1,10 +1,10 @@
-const CACHE_NAME = 'apexalgo-ios-pwa-v2';
+const CACHE_NAME = 'apexalgo-ios-pwa-v3';
 const CORE_ASSETS = [
-  '/',
-  '/index.html',
-  '/manifest.json',
-  '/apple-touch-icon.png',
-  '/icon-512.png'
+  './',
+  './index.html',
+  './manifest.json',
+  './apple-touch-icon.png',
+  './icon-512.png'
 ];
 
 self.addEventListener('install', (event) => {
@@ -28,8 +28,7 @@ self.addEventListener('fetch', (event) => {
   if (req.method !== 'GET') return;
   const url = new URL(req.url);
 
-  // Never cache live Binance API or local /api calls
-  if (url.pathname.startsWith('/api') || url.hostname.includes('binance.com') || url.pathname.startsWith('/socket.io')) {
+  if (url.pathname.includes('/api/') || url.hostname.includes('binance.com') || url.pathname.includes('/socket.io')) {
     return;
   }
 
@@ -42,6 +41,6 @@ self.addEventListener('fetch', (event) => {
         }
         return res;
       })
-      .catch(() => caches.match(req).then((cached) => cached || caches.match('/index.html')))
+      .catch(() => caches.match(req).then((cached) => cached || caches.match('./index.html')))
   );
 });
