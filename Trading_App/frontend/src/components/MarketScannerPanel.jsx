@@ -25,6 +25,15 @@ export function MarketScannerPanel({
   const [maxTrades, setMaxTrades] = useState(autopilotStatus?.config?.maxOpenTrades || 3);
   const [executingSymbol, setExecutingSymbol] = useState(null);
 
+  React.useEffect(() => {
+    if (autopilotStatus?.config) {
+      if (autopilotStatus.config.minConfidence !== undefined) setMinConfidence(autopilotStatus.config.minConfidence);
+      if (autopilotStatus.config.allocationUsdt !== undefined) setAllocation(autopilotStatus.config.allocationUsdt);
+      if (autopilotStatus.config.directionPreference !== undefined) setDirection(autopilotStatus.config.directionPreference);
+      if (autopilotStatus.config.maxOpenTrades !== undefined) setMaxTrades(autopilotStatus.config.maxOpenTrades);
+    }
+  }, [autopilotStatus]);
+
   const isAutoPilot = autopilotStatus?.isAutoPilotRunning || false;
 
   // Process & filter coins

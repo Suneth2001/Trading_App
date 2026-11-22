@@ -10,6 +10,16 @@ export function MarginGuardianPanel({ guardianSettings, onUpdateSettings }) {
   const [maxAccountDrawdownPct, setMaxAccountDrawdownPct] = useState(guardianSettings?.maxAccountDrawdownPct || 15.0);
   const [isSaved, setIsSaved] = useState(false);
 
+  React.useEffect(() => {
+    if (!guardianSettings) return;
+    if (guardianSettings.enabled !== undefined) setEnabled(guardianSettings.enabled);
+    if (guardianSettings.criticalMarginRatio !== undefined) setCriticalMarginRatio(guardianSettings.criticalMarginRatio);
+    if (guardianSettings.defaultStopLossPct !== undefined) setDefaultStopLossPct(guardianSettings.defaultStopLossPct);
+    if (guardianSettings.defaultTakeProfitPct !== undefined) setDefaultTakeProfitPct(guardianSettings.defaultTakeProfitPct);
+    if (guardianSettings.trailingStopPct !== undefined) setTrailingStopPct(guardianSettings.trailingStopPct);
+    if (guardianSettings.maxAccountDrawdownPct !== undefined) setMaxAccountDrawdownPct(guardianSettings.maxAccountDrawdownPct);
+  }, [guardianSettings]);
+
   const handleSave = async () => {
     await onUpdateSettings({
       enabled,

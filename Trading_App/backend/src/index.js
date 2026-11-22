@@ -1,5 +1,6 @@
 import express from 'express';
 import http from 'http';
+import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { Server } from 'socket.io';
@@ -513,7 +514,47 @@ io.on('connection', async (socket) => {
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const frontendDist = path.resolve(__dirname, '../../frontend/dist');
+const RUNTIME_STATE_FILE = path.resolve(__dirname, '../runtime_state.json');
 app.use(express.static(frontendDist));
+
+const saveRuntimeState = () => {
+  try {
+    fs.writeFileSync(RUNTIME_STATE_FILE, JSON.stringify({
+      balance: paperTrading.balance,
+      initialBalance: paperTrading.initialBalance,
+      positions: paperTrading.positions,
+      orderHistory: paperTrading.orderHistory.slice(0, 100),
+      guardianSettings: marginGuardian.getSettings(),
+      positionTargets: marginGuardian.positionTargets,
+      botStatus: strategyEngine.getStatus(),
+      autopilotStatus: marketAnalysis.getAutoPilotStatus()
+    }, null, 2));
+  } catch {}
+};
+
+const loadRuntimeState = () => {
+  try {
+    if (!fs.existsSync(RUNTIME_STATE_FILE)) return;
+    const saved = JSON.parse(fs.readFileSync(RUNTIME_STATE_FILE, 'utf8'));
+    if (saved.balance !== undefined) paperTrading.balance = saved.balance;
+    if (saved.initialBalance !== undefined) paperTrading.initialBalance = saved.initialBalance;
+    if (Array.isArray(saved.positions)) paperTrading.positions = saved.positions;
+    if (Array.isArray(saved.orderHistory)) paperTrading.orderHistory = saved.orderHistory;
+    if (saved.guardianSettings) marginGuardian.setSettings(saved.guardianSettings);
+    if (saved.positionTargets) marginGuardian.positionTargets = saved.positionTargets;
+    if (saved.botStatus) {
+      strategyEngine.updateConfig(saved.botStatus);
+      if (saved.botStatus.isRunning) strategyEngine.start();
+    }
+    if (saved.autopilotStatus) {
+      if (saved.autopilotStatus.config) marketAnalysis.updateAutoPilotConfig(saved.autopilotStatus.config);
+      if (saved.autopilotStatus.isAutoPilotRunning) marketAnalysis.startAutoPilot();
+    }
+  } catch {}
+};
+
+loadRuntimeState();
+setInterval(saveRuntimeState, 3000);
 
 // Generate & serve Apple iOS WebClip Configuration Profile (.mobileconfig) for 1-Tap iPhone Installation
 app.get('/ApexAlgo-iPhone.mobileconfig', (req, res) => {

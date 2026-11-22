@@ -5,6 +5,8 @@ node_modules/
 # Credentials & Secrets
 credentials.json
 **/credentials.json
+runtime_state.json
+**/runtime_state.json
 .env
 **/.env
 

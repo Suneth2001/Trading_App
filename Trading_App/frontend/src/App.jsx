@@ -20,7 +20,7 @@ import { getSocketUrl } from './utils/apiConfig';
 import { standaloneEngine } from './utils/standaloneEngine';
 
 export function App() {
-  const [activeSymbol, setActiveSymbol] = useState('BTCUSDT');
+  const [activeSymbol, setActiveSymbol] = useState(() => localStorage.getItem('apex_active_symbol') || 'BTCUSDT');
   const [pairs, setPairs] = useState([
     { symbol: 'BTCUSDT', name: 'Bitcoin', base: 'BTC', quote: 'USDT', precision: 2 },
     { symbol: 'ETHUSDT', name: 'Ethereum', base: 'ETH', quote: 'USDT', precision: 2 },
@@ -31,53 +31,31 @@ export function App() {
     { symbol: 'ADAUSDT', name: 'Cardano', base: 'ADA', quote: 'USDT', precision: 4 },
     { symbol: 'AVAXUSDT', name: 'Avalanche', base: 'AVAX', quote: 'USDT', precision: 2 },
     { symbol: 'LINKUSDT', name: 'Chainlink', base: 'LINK', quote: 'USDT', precision: 3 },
-    { symbol: 'SUIUSDT', name: 'Sui', base: 'SUI', quote: 'USDT', precision: 4 },
+    { symbol: 'SUIUSDT', name: 'Sui', quote: 'USDT', precision: 4 },
     { symbol: 'NEARUSDT', name: 'NEAR Protocol', base: 'NEAR', quote: 'USDT', precision: 3 },
     { symbol: 'PEPEUSDT', name: 'Pepe', base: 'PEPE', quote: 'USDT', precision: 8 }
   ]);
-  const [prices, setPrices] = useState({});
+  const [prices, setPrices] = useState(() => ({ ...standaloneEngine.prices }));
   const [tickerStats, setTickerStats] = useState({});
   const [candles, setCandles] = useState([]);
-  const [timeframe, setTimeframe] = useState('15m');
+  const [timeframe, setTimeframe] = useState(() => localStorage.getItem('apex_active_timeframe') || '15m');
   const [indicators, setIndicators] = useState(null);
-  const [account, setAccount] = useState({
-    availableBalance: 10000,
-    totalMargin: 0,
-    totalUnrealizedPnl: 0,
-    equity: 10000,
-    isLive: false
-  });
-  const [positions, setPositions] = useState([]);
-  const [history, setHistory] = useState([]);
-  const [botStatus, setBotStatus] = useState({
-    isRunning: false,
-    activeStrategyId: 'trend_following',
-    direction: 'BOTH',
-    allocationUsdt: 500,
-    leverage: 10,
-    recentLogs: []
-  });
-  const [strategies, setStrategies] = useState([]);
-  const [guardianSettings, setGuardianSettings] = useState({
-    enabled: true,
-    criticalMarginRatio: 80,
-    defaultStopLossPct: 4.5,
-    defaultTakeProfitPct: 9.0,
-    trailingStopPct: 2.0
-  });
-  const [marketAnalysis, setMarketAnalysis] = useState([]);
-  const [autopilotStatus, setAutopilotStatus] = useState({
-    isAutoPilotRunning: false,
-    config: { minConfidence: 80, allocationUsdt: 300, maxOpenTrades: 3, leverage: 10, directionPreference: 'BOTH' }
-  });
+  const [account, setAccount] = useState(() => standaloneEngine.getAccountSummary());
+  const [positions, setPositions] = useState(() => [...standaloneEngine.getActivePositions()]);
+  const [history, setHistory] = useState(() => [...standaloneEngine.orderHistory]);
+  const [botStatus, setBotStatus] = useState(() => ({ ...standaloneEngine.botStatus }));
+  const [strategies, setStrategies] = useState(() => [...standaloneEngine.constructor ? [] : []]);
+  const [guardianSettings, setGuardianSettings] = useState(() => ({ ...standaloneEngine.guardianSettings }));
+  const [marketAnalysis, setMarketAnalysis] = useState(() => [...(standaloneEngine.marketAnalysisCache || [])]);
+  const [autopilotStatus, setAutopilotStatus] = useState(() => ({ ...standaloneEngine.autopilotStatus }));
   const [aiData, setAiData] = useState(null);
   const [webhookData, setWebhookData] = useState(null);
 
-  // UI Navigation & Modals
-  const [activeTab, setActiveTab] = useState('terminal'); // 'terminal' | 'scanner' | 'positions' | 'bot' | 'guardian' | 'backtest' | 'ai'
+  // UI Navigation & Modals (Persisted across app restarts)
+  const [activeTab, setActiveTab] = useState(() => localStorage.getItem('apex_active_tab') || 'terminal');
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isTradingViewOpen, setIsTradingViewOpen] = useState(false);
-  const [soundEnabled, setSoundEnabled] = useState(true);
+  const [soundEnabled, setSoundEnabled] = useState(() => localStorage.getItem('apex_sound_enabled') !== 'false');
   const [notification, setNotification] = useState(null);
   const [pullDistance, setPullDistance] = useState(0);
   const [isPullRefreshing, setIsPullRefreshing] = useState(false);
@@ -314,6 +292,44 @@ export function App() {
     ];
     return () => unsubs.forEach(fn => fn && fn());
   }, []);
+
+  // Persist active UI selections & mirror active bot/autopilot state to standaloneEngine localStorage
+  useEffect(() => {
+    try { localStorage.setItem('apex_active_symbol', activeSymbol); } catch {}
+  }, [activeSymbol]);
+
+  useEffect(() => {
+    try { localStorage.setItem('apex_active_timeframe', timeframe); } catch {}
+  }, [timeframe]);
+
+  useEffect(() => {
+    try { localStorage.setItem('apex_active_tab', activeTab); } catch {}
+  }, [activeTab]);
+
+  useEffect(() => {
+    try { localStorage.setItem('apex_sound_enabled', soundEnabled ? 'true' : 'false'); } catch {}
+  }, [soundEnabled]);
+
+  useEffect(() => {
+    if (botStatus) {
+      standaloneEngine.botStatus = { ...standaloneEngine.botStatus, ...botStatus };
+      standaloneEngine._saveState();
+    }
+  }, [botStatus]);
+
+  useEffect(() => {
+    if (autopilotStatus) {
+      standaloneEngine.autopilotStatus = { ...standaloneEngine.autopilotStatus, ...autopilotStatus };
+      standaloneEngine._saveState();
+    }
+  }, [autopilotStatus]);
+
+  useEffect(() => {
+    if (guardianSettings) {
+      standaloneEngine.guardianSettings = { ...standaloneEngine.guardianSettings, ...guardianSettings };
+      standaloneEngine._saveState();
+    }
+  }, [guardianSettings]);
 
   // Fetch Klines & Indicators whenever symbol or timeframe changes
   useEffect(() => {

@@ -11,6 +11,17 @@ export function AutoTradingBotPanel({ botStatus, strategies, onStartBot, onStopB
   const [stopLossPct, setStopLossPct] = useState(botStatus?.stopLossPct || 4.0);
   const [takeProfitPct, setTakeProfitPct] = useState(botStatus?.takeProfitPct || 8.0);
 
+  React.useEffect(() => {
+    if (!botStatus) return;
+    if (botStatus.activeStrategyId) setSelectedStrategy(botStatus.activeStrategyId);
+    if (botStatus.direction) setDirection(botStatus.direction);
+    if (botStatus.allocationUsdt !== undefined) setAllocation(botStatus.allocationUsdt);
+    if (botStatus.leverage !== undefined) setLeverage(botStatus.leverage);
+    if (botStatus.timeframe) setTimeframe(botStatus.timeframe);
+    if (botStatus.stopLossPct !== undefined) setStopLossPct(botStatus.stopLossPct);
+    if (botStatus.takeProfitPct !== undefined) setTakeProfitPct(botStatus.takeProfitPct);
+  }, [botStatus?.activeStrategyId, botStatus?.direction, botStatus?.allocationUsdt, botStatus?.leverage, botStatus?.timeframe, botStatus?.stopLossPct, botStatus?.takeProfitPct]);
+
   const currentStratInfo = strategies.find(s => s.id === selectedStrategy) || strategies[0];
 
   const handleApplyConfig = async () => {
