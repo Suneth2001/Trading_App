@@ -4,6 +4,7 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { Server } from 'socket.io';
+import WebSocket from 'ws';
 import cors from 'cors';
 import { CONFIG } from './config.js';
 import { binanceService } from './services/binanceService.js';
@@ -297,6 +298,7 @@ app.post('/api/order/open', async (req, res) => {
 
     io.emit('position_opened', position);
     const state = await broadcastAccountState();
+    pushCloudSync();
 
     res.json({ success: true, position, liveOrder, summary: state?.summary, positions: state?.positions });
   } catch (err) {
@@ -340,6 +342,7 @@ app.post('/api/order/close', async (req, res) => {
 
     io.emit('position_closed', closed);
     await broadcastAccountState();
+    pushCloudSync();
 
     res.json({ success: true, closed });
   } catch (err) {
@@ -379,16 +382,22 @@ app.get('/api/bot/status', (req, res) => {
 
 app.post('/api/bot/config', (req, res) => {
   const updated = strategyEngine.updateConfig(req.body);
+  io.emit('bot_status', updated);
+  pushCloudSync();
   res.json(updated);
 });
 
 app.post('/api/bot/start', (req, res) => {
   const status = strategyEngine.start();
+  io.emit('bot_status', status);
+  pushCloudSync();
   res.json(status);
 });
 
 app.post('/api/bot/stop', (req, res) => {
   const status = strategyEngine.stop();
+  io.emit('bot_status', status);
+  pushCloudSync();
   res.json(status);
 });
 
@@ -399,6 +408,8 @@ app.get('/api/guardian/settings', (req, res) => {
 
 app.post('/api/guardian/settings', (req, res) => {
   const updated = marginGuardian.setSettings(req.body);
+  io.emit('guardian_settings', updated);
+  pushCloudSync();
   res.json(updated);
 });
 
@@ -474,16 +485,20 @@ app.get('/api/autopilot/status', (req, res) => {
 
 app.post('/api/autopilot/start', (req, res) => {
   const status = marketAnalysis.startAutoPilot();
+  pushCloudSync();
   res.json(status);
 });
 
 app.post('/api/autopilot/stop', (req, res) => {
   const status = marketAnalysis.stopAutoPilot();
+  pushCloudSync();
   res.json(status);
 });
 
 app.post('/api/autopilot/config', (req, res) => {
   const status = marketAnalysis.updateAutoPilotConfig(req.body);
+  io.emit('autopilot_status', status);
+  pushCloudSync();
   res.json(status);
 });
 
@@ -555,6 +570,154 @@ const loadRuntimeState = () => {
 
 loadRuntimeState();
 setInterval(saveRuntimeState, 3000);
+
+// ================= CROSS-DEVICE REAL-TIME CLOUD SYNC (LAPTOP <-> MOBILE) ================= //
+const SYNC_DEVICE_ID = 'PC-' + Math.random().toString(36).slice(2, 10);
+const SYNC_TOPIC = 'apexalgo_cloud_sync_suneth2001_v2';
+let lastAppliedSyncTime = 0;
+let isApplyingRemoteSync = false;
+
+async function pushCloudSync() {
+  if (isApplyingRemoteSync) return;
+  const now = Date.now();
+  lastAppliedSyncTime = now;
+  saveRuntimeState();
+
+  let liveSummary = null;
+  let livePositions = [];
+  if (paperTrading.isLive && binanceService.liveExchange) {
+    try {
+      liveSummary = await binanceService.getLiveBalance();
+      livePositions = await binanceService.getLivePositions();
+    } catch {}
+  }
+
+  const botSt = strategyEngine.getStatus();
+  const gSt = marginGuardian.getSettings();
+  const snapshot = {
+    deviceId: SYNC_DEVICE_ID,
+    updatedAt: now,
+    isLive: paperTrading.isLive,
+    balance: paperTrading.balance,
+    initialBalance: paperTrading.initialBalance,
+    liveSummary,
+    livePositions: (livePositions || []).slice(0, 15),
+    positions: (paperTrading.positions || []).slice(0, 15),
+    orderHistory: (paperTrading.orderHistory || []).slice(0, 10),
+    botStatus: {
+      isRunning: botSt.isRunning,
+      activeStrategyId: botSt.activeStrategyId,
+      symbol: botSt.symbol,
+      direction: botSt.direction,
+      allocationUsdt: botSt.allocationUsdt,
+      leverage: botSt.leverage,
+      stopLossPct: botSt.stopLossPct,
+      takeProfitPct: botSt.takeProfitPct,
+      timeframe: botSt.timeframe,
+      recentLogs: (botSt.recentLogs || []).slice(0, 8)
+    },
+    autopilotStatus: marketAnalysis.getAutoPilotStatus(),
+    guardianSettings: {
+      enabled: gSt.enabled,
+      criticalMarginRatio: gSt.criticalMarginRatio,
+      defaultStopLossPct: gSt.defaultStopLossPct,
+      defaultTakeProfitPct: gSt.defaultTakeProfitPct,
+      trailingStopPct: gSt.trailingStopPct
+    },
+    lastAutoTradeTime: marketAnalysis.lastAutoTradeTime || 0
+  };
+
+  try {
+    await fetch(`https://ntfy.sh/${SYNC_TOPIC}`, {
+      method: 'POST',
+      body: JSON.stringify(snapshot)
+    });
+  } catch {}
+}
+
+function applyRemoteSnapshot(snap) {
+  if (!snap || typeof snap !== 'object') return;
+  if (snap.deviceId === SYNC_DEVICE_ID) return;
+  if (!snap.updatedAt || snap.updatedAt <= lastAppliedSyncTime) return;
+
+  isApplyingRemoteSync = true;
+  try {
+    lastAppliedSyncTime = snap.updatedAt;
+    if (snap.balance !== undefined) paperTrading.balance = Number(snap.balance);
+    if (snap.initialBalance !== undefined) paperTrading.initialBalance = Number(snap.initialBalance);
+    if (Array.isArray(snap.positions)) paperTrading.positions = snap.positions;
+    if (Array.isArray(snap.orderHistory) && snap.orderHistory.length > 0) {
+      paperTrading.orderHistory = snap.orderHistory;
+    }
+    if (snap.botStatus) {
+      strategyEngine.updateConfig(snap.botStatus);
+      if (snap.botStatus.isRunning && !strategyEngine.isRunning) strategyEngine.start();
+      else if (!snap.botStatus.isRunning && strategyEngine.isRunning) strategyEngine.stop();
+      io.emit('bot_status', strategyEngine.getStatus());
+    }
+    if (snap.autopilotStatus) {
+      if (snap.autopilotStatus.config) marketAnalysis.updateAutoPilotConfig(snap.autopilotStatus.config);
+      if (snap.autopilotStatus.isAutoPilotRunning && !marketAnalysis.isAutoPilotRunning) marketAnalysis.startAutoPilot();
+      else if (!snap.autopilotStatus.isAutoPilotRunning && marketAnalysis.isAutoPilotRunning) marketAnalysis.stopAutoPilot();
+      io.emit('autopilot_status', marketAnalysis.getAutoPilotStatus());
+    }
+    if (snap.guardianSettings) {
+      marginGuardian.setSettings(snap.guardianSettings);
+      io.emit('guardian_settings', marginGuardian.getSettings());
+    }
+    if (snap.lastAutoTradeTime) {
+      marketAnalysis.lastAutoTradeTime = Math.max(marketAnalysis.lastAutoTradeTime || 0, snap.lastAutoTradeTime);
+    }
+
+    saveRuntimeState();
+    broadcastAccountState();
+  } finally {
+    isApplyingRemoteSync = false;
+  }
+}
+
+async function pollCloudSync() {
+  try {
+    const res = await fetch(`https://ntfy.sh/${SYNC_TOPIC}/json?poll=1&since=12h`);
+    const text = await res.text();
+    if (!text) return;
+    const lines = text.trim().split('\n');
+    let latestSnap = null;
+    for (const line of lines) {
+      try {
+        const obj = JSON.parse(line);
+        if (obj.event === 'message' && obj.message) {
+          const parsed = JSON.parse(obj.message);
+          if (parsed && parsed.updatedAt && (!latestSnap || parsed.updatedAt > latestSnap.updatedAt)) {
+            latestSnap = parsed;
+          }
+        }
+      } catch {}
+    }
+    if (latestSnap) applyRemoteSnapshot(latestSnap);
+  } catch {}
+}
+
+function connectCloudSyncWs() {
+  try {
+    const ws = new WebSocket(`wss://ntfy.sh/${SYNC_TOPIC}/ws`);
+    ws.on('message', (data) => {
+      try {
+        const obj = JSON.parse(data.toString());
+        if (obj.event === 'message' && obj.message) {
+          const snap = JSON.parse(obj.message);
+          applyRemoteSnapshot(snap);
+        }
+      } catch {}
+    });
+    ws.on('close', () => setTimeout(connectCloudSyncWs, 4000));
+    ws.on('error', () => { try { ws.close(); } catch {} });
+  } catch {}
+}
+
+pollCloudSync();
+connectCloudSyncWs();
+setInterval(pollCloudSync, 4000);
 
 // Generate & serve Apple iOS WebClip Configuration Profile (.mobileconfig) for 1-Tap iPhone Installation
 app.get('/ApexAlgo-iPhone.mobileconfig', (req, res) => {

@@ -554,7 +554,14 @@ class StandaloneTradingEngine {
     this.webhookSecret = savedState.webhookSecret || 'AGY_AUTOTRADE_SECURE_TOKEN_2026';
     this.webhookLogs = savedState.webhookLogs || [];
     this.marketAnalysisCache = savedState.marketAnalysisCache || [];
-    this.lastAutoTradeTime = 0;
+    this.lastAutoTradeTime = savedState.lastAutoTradeTime || 0;
+
+    // Cross-Device Real-Time Cloud Sync (Laptop <-> Mobile iPhone/Android)
+    this.deviceId = 'MOB-' + Math.random().toString(36).slice(2, 10);
+    this.syncTopic = 'apexalgo_cloud_sync_suneth2001_v2';
+    this.lastAppliedSyncTime = savedState.lastAppliedSyncTime || 0;
+    this.syncWs = null;
+    this.isApplyingRemoteSync = false;
   }
 
   _loadState() {
@@ -585,8 +592,145 @@ class StandaloneTradingEngine {
         autopilotStatus: this.autopilotStatus,
         webhookSecret: this.webhookSecret,
         webhookLogs: (this.webhookLogs || []).slice(0, 30),
-        marketAnalysisCache: this.marketAnalysisCache
+        marketAnalysisCache: this.marketAnalysisCache,
+        lastAutoTradeTime: this.lastAutoTradeTime,
+        lastAppliedSyncTime: this.lastAppliedSyncTime
       }));
+    } catch {}
+  }
+
+  // ================= CROSS-DEVICE REAL-TIME CLOUD SYNC (LAPTOP <-> MOBILE) ================= //
+
+  _pushCloudSync() {
+    if (this.isApplyingRemoteSync) return;
+    const now = Date.now();
+    this.lastAppliedSyncTime = now;
+    this._saveState();
+
+    const snapshot = {
+      deviceId: this.deviceId,
+      updatedAt: now,
+      isLive: this.isLive,
+      balance: this.balance,
+      initialBalance: this.initialBalance,
+      liveSummary: this.liveSummary,
+      livePositions: (this.livePositions || []).slice(0, 15),
+      positions: (this.positions || []).slice(0, 15),
+      orderHistory: (this.orderHistory || []).slice(0, 10),
+      botStatus: {
+        isRunning: this.botStatus.isRunning,
+        activeStrategyId: this.botStatus.activeStrategyId,
+        symbol: this.botStatus.symbol,
+        direction: this.botStatus.direction,
+        allocationUsdt: this.botStatus.allocationUsdt,
+        leverage: this.botStatus.leverage,
+        stopLossPct: this.botStatus.stopLossPct,
+        takeProfitPct: this.botStatus.takeProfitPct,
+        timeframe: this.botStatus.timeframe,
+        recentLogs: (this.botStatus.recentLogs || []).slice(0, 8)
+      },
+      autopilotStatus: this.autopilotStatus,
+      guardianSettings: {
+        enabled: this.guardianSettings.enabled,
+        criticalMarginRatio: this.guardianSettings.criticalMarginRatio,
+        defaultStopLossPct: this.guardianSettings.defaultStopLossPct,
+        defaultTakeProfitPct: this.guardianSettings.defaultTakeProfitPct,
+        trailingStopPct: this.guardianSettings.trailingStopPct
+      },
+      lastAutoTradeTime: this.lastAutoTradeTime
+    };
+
+    try {
+      const f = window._nativeFetch || window.fetch.bind(window);
+      f(`https://ntfy.sh/${this.syncTopic}`, {
+        method: 'POST',
+        body: JSON.stringify(snapshot)
+      }).catch(() => {});
+    } catch {}
+  }
+
+  _applyRemoteSnapshot(snap) {
+    if (!snap || typeof snap !== 'object') return;
+    if (snap.deviceId === this.deviceId) return;
+    if (!snap.updatedAt || snap.updatedAt <= this.lastAppliedSyncTime) return;
+
+    this.isApplyingRemoteSync = true;
+    try {
+      this.lastAppliedSyncTime = snap.updatedAt;
+      if (snap.isLive !== undefined) this.isLive = Boolean(snap.isLive);
+      if (snap.balance !== undefined) this.balance = Number(snap.balance);
+      if (snap.initialBalance !== undefined) this.initialBalance = Number(snap.initialBalance);
+      if (snap.liveSummary) this.liveSummary = snap.liveSummary;
+      if (Array.isArray(snap.livePositions)) this.livePositions = snap.livePositions;
+      if (Array.isArray(snap.positions)) this.positions = snap.positions;
+      if (Array.isArray(snap.orderHistory) && snap.orderHistory.length > 0) {
+        this.orderHistory = snap.orderHistory;
+      }
+      if (snap.botStatus) {
+        this.botStatus = { ...this.botStatus, ...snap.botStatus };
+      }
+      if (snap.autopilotStatus) {
+        this.autopilotStatus = { ...this.autopilotStatus, ...snap.autopilotStatus };
+      }
+      if (snap.guardianSettings) {
+        this.guardianSettings = { ...this.guardianSettings, ...snap.guardianSettings };
+      }
+      if (snap.lastAutoTradeTime) {
+        this.lastAutoTradeTime = Math.max(this.lastAutoTradeTime, snap.lastAutoTradeTime);
+      }
+
+      this._saveState();
+      this.emit('account_summary', this.getAccountSummary());
+      this.emit('positions_update', [...this.getActivePositions()]);
+      this.emit('bot_status', this.botStatus);
+      this.emit('autopilot_status', this.autopilotStatus);
+    } finally {
+      this.isApplyingRemoteSync = false;
+    }
+  }
+
+  async _pollCloudSync() {
+    try {
+      const f = window._nativeFetch || window.fetch.bind(window);
+      const res = await f(`https://ntfy.sh/${this.syncTopic}/json?poll=1&since=12h`);
+      const text = await res.text();
+      if (!text) return;
+      const lines = text.trim().split('\n');
+      let latestSnap = null;
+      for (const line of lines) {
+        try {
+          const obj = JSON.parse(line);
+          if (obj.event === 'message' && obj.message) {
+            const parsed = JSON.parse(obj.message);
+            if (parsed && parsed.updatedAt && (!latestSnap || parsed.updatedAt > latestSnap.updatedAt)) {
+              latestSnap = parsed;
+            }
+          }
+        } catch {}
+      }
+      if (latestSnap) {
+        this._applyRemoteSnapshot(latestSnap);
+      }
+    } catch {}
+  }
+
+  _connectCloudSyncWs() {
+    try {
+      if (this.syncWs && (this.syncWs.readyState === 0 || this.syncWs.readyState === 1)) return;
+      const ws = new WebSocket(`wss://ntfy.sh/${this.syncTopic}/ws`);
+      this.syncWs = ws;
+      ws.onmessage = (event) => {
+        try {
+          const obj = JSON.parse(event.data);
+          if (obj.event === 'message' && obj.message) {
+            const snap = JSON.parse(obj.message);
+            this._applyRemoteSnapshot(snap);
+          }
+        } catch {}
+      };
+      ws.onclose = () => {
+        setTimeout(() => this._connectCloudSyncWs(), 4000);
+      };
     } catch {}
   }
 
@@ -724,6 +868,7 @@ class StandaloneTradingEngine {
     };
     this.livePositions = livePositions;
     this._saveState();
+    this._pushCloudSync();
 
     this.emit('account_summary', this.liveSummary);
     this.emit('positions_update', this.livePositions);
@@ -821,6 +966,13 @@ class StandaloneTradingEngine {
     this.started = true;
     this._connectBinanceWs();
     this.fetchTickerStats();
+
+    // Start Real-Time Cloud Sync (Laptop <-> Mobile)
+    this._pollCloudSync();
+    this._connectCloudSyncWs();
+    setInterval(() => {
+      this._pollCloudSync();
+    }, 4000);
 
     // Broadcast restored persisted states immediately on boot
     this.emit('account_summary', this.getAccountSummary());
@@ -1105,6 +1257,7 @@ class StandaloneTradingEngine {
 
     this.positions.push(pos);
     this._saveState();
+    this._pushCloudSync();
     this.emit('position_opened', pos);
     this.emit('account_summary', this.getAccountSummary());
     this.emit('positions_update', [...this.positions]);
@@ -1141,6 +1294,7 @@ class StandaloneTradingEngine {
     this.orderHistory.unshift(closed);
     this.positions.splice(idx, 1);
     this._saveState();
+    this._pushCloudSync();
     this.emit('position_closed', closed);
     this.emit('account_summary', this.getAccountSummary());
     this.emit('positions_update', [...this.positions]);
@@ -1686,6 +1840,7 @@ class StandaloneTradingEngine {
       if (method === 'POST') {
         this.guardianSettings = { ...this.guardianSettings, ...body };
         this._saveState();
+        this._pushCloudSync();
       }
       return this.guardianSettings;
     }
@@ -1693,6 +1848,7 @@ class StandaloneTradingEngine {
     if (path === '/api/bot/config' && method === 'POST') {
       this.botStatus = { ...this.botStatus, ...body };
       this._saveState();
+      this._pushCloudSync();
       this.emit('bot_status', this.botStatus);
       return this.botStatus;
     }
@@ -1706,6 +1862,7 @@ class StandaloneTradingEngine {
       };
       this.botStatus.recentLogs = [log, ...(this.botStatus.recentLogs || [])].slice(0, 50);
       this._saveState();
+      this._pushCloudSync();
       this.emit('bot_status', this.botStatus);
       this._evaluateBotCycle();
       return this.botStatus;
@@ -1713,6 +1870,7 @@ class StandaloneTradingEngine {
     if (path === '/api/bot/stop' && method === 'POST') {
       this.botStatus.isRunning = false;
       this._saveState();
+      this._pushCloudSync();
       this.emit('bot_status', this.botStatus);
       return this.botStatus;
     }
@@ -1720,6 +1878,7 @@ class StandaloneTradingEngine {
     if (path === '/api/autopilot/start' && method === 'POST') {
       this.autopilotStatus.isAutoPilotRunning = true;
       this._saveState();
+      this._pushCloudSync();
       this.emit('autopilot_status', this.autopilotStatus);
       if (this.marketAnalysisCache.length > 0) {
         this._evaluateAutoPilot(this.marketAnalysisCache);
@@ -1729,12 +1888,14 @@ class StandaloneTradingEngine {
     if (path === '/api/autopilot/stop' && method === 'POST') {
       this.autopilotStatus.isAutoPilotRunning = false;
       this._saveState();
+      this._pushCloudSync();
       this.emit('autopilot_status', this.autopilotStatus);
       return this.autopilotStatus;
     }
     if (path === '/api/autopilot/config' && method === 'POST') {
       this.autopilotStatus.config = { ...this.autopilotStatus.config, ...body };
       this._saveState();
+      this._pushCloudSync();
       this.emit('autopilot_status', this.autopilotStatus);
       return this.autopilotStatus;
     }

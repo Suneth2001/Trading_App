@@ -172,6 +172,10 @@ export function App() {
       if (status) setAutopilotStatus(status);
     });
 
+    socket.on('guardian_settings', (g) => {
+      if (g) setGuardianSettings(g);
+    });
+
     socket.on('autopilot_trade', (tradeAlert) => {
       soundFX.playOrderPing();
       confetti({ particleCount: 50, spread: 45, origin: { y: 0.8 } });
