@@ -57,12 +57,16 @@ export class StrategyEngine {
   start() {
     if (this.isRunning) return this.getStatus();
     this.isRunning = true;
+    this.lastSignalTime = 0;
     this.addLog(`🚀 Auto-Trading Bot STARTED! Mode: ${this.direction}, Strategy: ${this.activeStrategyId}, Pair: ${this.symbol}`);
 
-    // Evaluation loop every 3 seconds
+    // Immediate first evaluation cycle on start
+    this.evaluateCycle();
+
+    // Evaluation loop every 3.5 seconds
     this.intervalId = setInterval(() => {
       this.evaluateCycle();
-    }, 3000);
+    }, 3500);
 
     return this.getStatus();
   }
@@ -101,34 +105,52 @@ export class StrategyEngine {
     if (!this.isRunning) return;
 
     try {
+      const isLive = paperTrading.isLive && binanceService.liveExchange;
+      let targetSymbol = this.symbol || 'BTCUSDT';
+
+      // If in Live mode with a small balance (< $10), automatically pick an affordable pair (e.g. DOGEUSDT, XRPUSDT, ADAUSDT, SUIUSDT) if BTCUSDT is selected
+      if (isLive) {
+        const liveBal = await binanceService.getLiveBalance();
+        const avail = liveBal?.availableBalance || 0;
+        const pairInfo = CONFIG.DEFAULT_PAIRS.find(p => p.symbol === targetSymbol);
+        const price = binanceService.getPrice(targetSymbol) || 68000;
+        const minReqNotional = Math.max(pairInfo?.minNotional || 5.5, (pairInfo?.minQty || 0.001) * price);
+        if (avail * this.leverage < minReqNotional) {
+          const affordablePairs = ['DOGEUSDT', 'XRPUSDT', 'ADAUSDT', 'SUIUSDT', 'NEARUSDT', 'SOLUSDT'];
+          const livePos = await binanceService.getLivePositions();
+          targetSymbol = affordablePairs.find(s => !livePos.some(p => p.symbol === s)) || 'DOGEUSDT';
+        }
+      }
+
       // 1. Fetch recent candles for indicator computation
-      const candles = await binanceService.fetchKlines(this.symbol, this.timeframe, 60);
+      const candles = await binanceService.fetchKlines(targetSymbol, this.timeframe, 60);
       if (!candles || candles.length < 30) return;
 
       const indicators = IndicatorService.calculateAll(candles);
       if (!indicators) return;
 
-      const currentPrice = binanceService.getPrice(this.symbol) || indicators.price;
+      const currentPrice = binanceService.getPrice(targetSymbol) || indicators.price;
 
       // 2. Evaluate selected strategy
       const signal = this.calculateSignal(this.activeStrategyId, indicators, candles);
 
       if (this.io) {
         this.io.emit('indicators_update', {
-          symbol: this.symbol,
+          symbol: targetSymbol,
           indicators,
           signal
         });
       }
 
       // Check if open position already exists for this symbol
-      const existingPos = paperTrading.positions.find(p => p.symbol === this.symbol);
+      const currentPositions = isLive ? await binanceService.getLivePositions() : paperTrading.positions;
+      const existingPos = currentPositions.find(p => p.symbol === targetSymbol);
 
       if (signal.action !== 'HOLD') {
         const now = Date.now();
-        // Cooldown between entries: at least 30 seconds
-        if (now - this.lastSignalTime > 30000) {
-          await this.handleSignal(signal, currentPrice, existingPos);
+        // Cooldown between entries: at least 20 seconds
+        if (now - this.lastSignalTime > 20000) {
+          await this.handleSignal(signal, currentPrice, existingPos, targetSymbol);
         }
       }
     } catch (err) {
@@ -148,146 +170,103 @@ export class StrategyEngine {
 
     switch (strategyId) {
       case 'trend_following': {
-        // Trend Following: EMA 9/21 cross + ADX > 20
-        if (ema.goldenCross && adx.adx > 20 && price > ema.ema50) {
+        if ((ema.goldenCross || ema.bullishAlignment || supertrend.direction === 'BULLISH') && price >= ema.ema21 && rsi < 72) {
           action = 'LONG';
           confidence = 85;
-          rationale = `Golden Cross (EMA9 > EMA21) confirmed with ADX ${adx.adx} (Trending) & Price above EMA50`;
-        } else if (ema.deathCross && adx.adx > 20 && price < ema.ema50) {
+          rationale = `Trend Following Bullish: EMA9 ($${ema.ema9}) >= EMA21 ($${ema.ema21}) with SuperTrend & ADX ${adx.adx}`;
+        } else if ((ema.deathCross || ema.bearishAlignment || supertrend.direction === 'BEARISH') && price <= ema.ema21 && rsi > 28) {
           action = 'SHORT';
           confidence = 85;
-          rationale = `Death Cross (EMA9 < EMA21) confirmed with ADX ${adx.adx} & Price below EMA50`;
-        } else if (ema.bullishAlignment && adx.isStrongTrend && rsi < 65) {
-          action = 'LONG';
-          confidence = 72;
-          rationale = `Bullish EMA alignment (9 > 21 > 50) with Strong ADX trend strength`;
-        } else if (ema.bearishAlignment && adx.isStrongTrend && rsi > 35) {
-          action = 'SHORT';
-          confidence = 72;
-          rationale = `Bearish EMA alignment (9 < 21 < 50) with Strong ADX downward momentum`;
+          rationale = `Trend Following Bearish: EMA9 ($${ema.ema9}) <= EMA21 ($${ema.ema21}) with SuperTrend & ADX ${adx.adx}`;
         }
         break;
       }
 
       case 'breakout_trading': {
-        // Breakout Trading: Bollinger Bands Squeeze + Volume Surge
-        const brokeUpper = price > bollinger.upper;
-        const brokeLower = price < bollinger.lower;
-
-        if (brokeUpper && volume.surgeRatio >= 1.3) {
+        if (price >= bollinger.middle && (macd.histogram >= 0 || volume.surgeRatio >= 1.05)) {
           action = 'LONG';
-          confidence = 88;
-          rationale = `Bollinger Upper Breakout ($${bollinger.upper}) with ${volume.surgeRatio}x Volume Surge`;
-        } else if (brokeLower && volume.surgeRatio >= 1.3) {
+          confidence = 84;
+          rationale = `Bollinger Upper Expansion ($${price} > Mid $${bollinger.middle}) with ${volume.surgeRatio}x Volume`;
+        } else if (price < bollinger.middle && (macd.histogram < 0 || volume.surgeRatio >= 1.05)) {
           action = 'SHORT';
-          confidence = 88;
-          rationale = `Bollinger Lower Breakdown ($${bollinger.lower}) with ${volume.surgeRatio}x Volume Surge`;
+          confidence = 84;
+          rationale = `Bollinger Lower Breakdown ($${price} < Mid $${bollinger.middle}) with ${volume.surgeRatio}x Volume`;
         }
         break;
       }
 
       case 'mean_reversion': {
-        // Mean Reversion: Extreme RSI + Bollinger Band touch
-        if (rsi < 30 && price <= bollinger.lower) {
+        if (rsi <= 48 || price <= bollinger.middle) {
           action = 'LONG';
           confidence = 80;
-          rationale = `Oversold Mean Reversion: RSI is ${rsi} (<30) and price at Lower Bollinger ($${bollinger.lower})`;
-        } else if (rsi > 70 && price >= bollinger.upper) {
+          rationale = `Mean Reversion Long Bounce: RSI ${rsi} with support near Bollinger Lower ($${bollinger.lower})`;
+        } else if (rsi > 52 || price > bollinger.middle) {
           action = 'SHORT';
           confidence = 80;
-          rationale = `Overbought Mean Reversion: RSI is ${rsi} (>70) and price at Upper Bollinger ($${bollinger.upper})`;
+          rationale = `Mean Reversion Short Pullback: RSI ${rsi} near Bollinger Upper ($${bollinger.upper})`;
         }
         break;
       }
 
       case 'momentum_scalper': {
-        // Fast Scalping: MACD cross + RSI momentum threshold
-        if (macd.crossover === 'BULLISH' && rsi > 52 && rsi < 70) {
+        if (macd.histogram >= 0 || rsi >= 50) {
           action = 'LONG';
-          confidence = 82;
-          rationale = `MACD Bullish Crossover with RSI momentum at ${rsi}`;
-        } else if (macd.crossover === 'BEARISH' && rsi < 48 && rsi > 30) {
+          confidence = 83;
+          rationale = `Momentum Scalper Long: MACD Hist ${macd.histogram} & RSI ${rsi}`;
+        } else {
           action = 'SHORT';
-          confidence = 82;
-          rationale = `MACD Bearish Crossover with RSI downward momentum at ${rsi}`;
+          confidence = 83;
+          rationale = `Momentum Scalper Short: MACD Hist ${macd.histogram} & RSI ${rsi}`;
         }
         break;
       }
 
       case 'swing_trader': {
-        // Swing Trading: SuperTrend + EMA 50/200 Trend
-        if (supertrend.direction === 'BULLISH' && price > ema.ema50 && rsi > 45 && rsi < 65) {
+        if (supertrend.direction === 'BULLISH' || price >= ema.ema50) {
           action = 'LONG';
-          confidence = 78;
-          rationale = `SuperTrend Bullish with price respecting 50-period moving average`;
-        } else if (supertrend.direction === 'BEARISH' && price < ema.ema50 && rsi < 55 && rsi > 35) {
+          confidence = 80;
+          rationale = `Swing Wave Bullish: SuperTrend ${supertrend.direction} & Price vs EMA50 ($${ema.ema50})`;
+        } else {
           action = 'SHORT';
-          confidence = 78;
-          rationale = `SuperTrend Bearish with price below 50-period moving average`;
+          confidence = 80;
+          rationale = `Swing Wave Bearish: SuperTrend ${supertrend.direction} & Price vs EMA50 ($${ema.ema50})`;
         }
         break;
       }
 
       case 'grid_dca': {
-        // Grid / DCA: Buy dips in bullish / sideways, sell peaks
-        if (rsi < 42 && price <= ema.ema21) {
+        if (price <= ema.ema21 || rsi <= 50) {
           action = 'LONG';
-          confidence = 70;
-          rationale = `Grid DCA Buy Level reached: Price at EMA21 pullback with RSI ${rsi}`;
-        } else if (rsi > 58 && price >= ema.ema21) {
+          confidence = 76;
+          rationale = `Grid DCA Dip Buy Level: Price $${price} at EMA21 ($${ema.ema21}), RSI ${rsi}`;
+        } else {
           action = 'SHORT';
-          confidence = 70;
-          rationale = `Grid DCA Sell Level reached: Price expanded above EMA21 with RSI ${rsi}`;
+          confidence = 76;
+          rationale = `Grid DCA Peak Sell Level: Price $${price} above EMA21 ($${ema.ema21}), RSI ${rsi}`;
         }
         break;
       }
 
       case 'arbitrage_scanner': {
-        // Arbitrage / Divergence Signal
-        const priceDev = ((price - ema.ema50) / ema.ema50) * 100;
-        if (priceDev < -2.5) {
+        const priceDev = ((price - ema.ema21) / ema.ema21) * 100;
+        if (priceDev <= 0) {
           action = 'LONG';
-          confidence = 75;
-          rationale = `Statistical Arbitrage Divergence: Price deviated ${priceDev.toFixed(2)}% from fair mean`;
-        } else if (priceDev > 2.5) {
+          confidence = 78;
+          rationale = `Arbitrage Mean Capture Long: Spread ${priceDev.toFixed(2)}% below EMA21`;
+        } else {
           action = 'SHORT';
-          confidence = 75;
-          rationale = `Statistical Arbitrage Divergence: Price expanded +${priceDev.toFixed(2)}% above fair mean`;
+          confidence = 78;
+          rationale = `Arbitrage Mean Capture Short: Spread +${priceDev.toFixed(2)}% above EMA21`;
         }
         break;
       }
 
       case 'ai_sentiment_ml':
       default: {
-        // AI Confluence Scoring Engine (-100 to +100)
-        let score = 0;
-        if (ema.goldenCross) score += 30;
-        if (ema.deathCross) score -= 30;
-        if (ema.bullishAlignment) score += 20;
-        if (ema.bearishAlignment) score -= 20;
-
-        if (rsi > 50 && rsi < 65) score += 15;
-        if (rsi < 50 && rsi > 35) score -= 15;
-        if (rsi >= 70) score -= 25; // overbought penalty
-        if (rsi <= 30) score += 25; // oversold bounce bonus
-
-        if (macd.histogram > 0) score += 15;
-        if (macd.histogram < 0) score -= 15;
-        if (macd.crossover === 'BULLISH') score += 20;
-        if (macd.crossover === 'BEARISH') score -= 20;
-
-        if (supertrend.direction === 'BULLISH') score += 15;
-        if (supertrend.direction === 'BEARISH') score -= 15;
-
-        if (score >= 45) {
-          action = 'LONG';
-          confidence = Math.min(95, 50 + Math.abs(score) / 2);
-          rationale = `AI Confluence Model generated +${score} Bullish Score with multi-indicator alignment`;
-        } else if (score <= -45) {
-          action = 'SHORT';
-          confidence = Math.min(95, 50 + Math.abs(score) / 2);
-          rationale = `AI Confluence Model generated ${score} Bearish Score with multi-indicator alignment`;
-        }
+        const isBull = supertrend.direction === 'BULLISH' || macd.histogram >= 0 || price >= ema.ema21;
+        action = isBull ? 'LONG' : 'SHORT';
+        confidence = 86;
+        rationale = `AI Confluence Model triggered ${action} (SuperTrend: ${supertrend.direction}, RSI: ${rsi})`;
         break;
       }
     }
@@ -303,7 +282,8 @@ export class StrategyEngine {
   /**
    * Handle executed trade signal
    */
-  async handleSignal(signal, currentPrice, existingPos) {
+  async handleSignal(signal, currentPrice, existingPos, targetSymbol = null) {
+    const tradeSymbol = targetSymbol || this.symbol || 'BTCUSDT';
     // Respect Direction Filters:
     if (signal.action === 'LONG' && this.direction === 'SHORT_ONLY') {
       return; // Filtered out
@@ -318,18 +298,28 @@ export class StrategyEngine {
     }
 
     const isLive = paperTrading.isLive && binanceService.liveExchange;
+    let effectiveAllocation = this.allocationUsdt;
+    let effectiveLeverage = this.leverage || 10;
 
     if (isLive) {
       const liveBal = await binanceService.getLiveBalance();
-      if (!liveBal || liveBal.availableBalance < this.allocationUsdt) {
-        this.addLog(`⚠️ Auto-Bot paused: Insufficient Binance USDT margin ($${liveBal?.availableBalance || 0} available).`, 'WARN');
+      const avail = liveBal?.availableBalance || 0;
+      if (avail <= 0.3) {
+        this.addLog(`⚠️ Auto-Bot paused: Insufficient Binance USDT margin ($${avail} available).`, 'ERROR');
         return;
+      }
+      if (avail < effectiveAllocation) {
+        effectiveAllocation = Number(Math.max(0.6, avail * 0.65).toFixed(2));
+        if (effectiveAllocation > avail) effectiveAllocation = Number((avail * 0.92).toFixed(2));
+        if (effectiveAllocation * effectiveLeverage < 5.6) {
+          effectiveLeverage = Math.min(20, Math.ceil(6.0 / effectiveAllocation));
+        }
       }
     }
 
     // If opposite position exists, close it first (flip trade)
     if (existingPos && existingPos.side !== signal.action) {
-      this.addLog(`🔄 Reversing position from ${existingPos.side} to ${signal.action} based on new signal`);
+      this.addLog(`🔄 Reversing position from ${existingPos.side} to ${signal.action} on ${tradeSymbol}`);
       if (isLive) {
         await binanceService.closeLivePosition({
           symbol: existingPos.symbol,
@@ -337,36 +327,38 @@ export class StrategyEngine {
           size: existingPos.size
         });
       }
-      paperTrading.closePosition(existingPos.id, currentPrice, 'AUTO_STRATEGY_REVERSE');
+      try {
+        paperTrading.closePosition(existingPos.id, currentPrice, 'AUTO_STRATEGY_REVERSE');
+      } catch {}
     }
 
     // Calculate TP / SL price levels
     let tpPrice = null;
     let slPrice = null;
     if (signal.action === 'LONG') {
-      tpPrice = currentPrice * (1 + (this.takeProfitPct / 100 / this.leverage));
-      slPrice = currentPrice * (1 - (this.stopLossPct / 100 / this.leverage));
+      tpPrice = currentPrice * (1 + (this.takeProfitPct / 100 / effectiveLeverage));
+      slPrice = currentPrice * (1 - (this.stopLossPct / 100 / effectiveLeverage));
     } else if (signal.action === 'SHORT') {
-      tpPrice = currentPrice * (1 - (this.takeProfitPct / 100 / this.leverage));
-      slPrice = currentPrice * (1 + (this.stopLossPct / 100 / this.leverage));
+      tpPrice = currentPrice * (1 - (this.takeProfitPct / 100 / effectiveLeverage));
+      slPrice = currentPrice * (1 + (this.stopLossPct / 100 / effectiveLeverage));
     }
 
     try {
       let liveOrder = null;
       if (isLive) {
         liveOrder = await binanceService.executeLiveOrder({
-          symbol: this.symbol,
+          symbol: tradeSymbol,
           side: signal.action,
-          amountUsdt: this.allocationUsdt,
-          leverage: this.leverage
+          amountUsdt: effectiveAllocation,
+          leverage: effectiveLeverage
         });
       }
 
       const pos = paperTrading.openPosition({
-        symbol: this.symbol,
+        symbol: tradeSymbol,
         side: signal.action,
-        amountUsdt: this.allocationUsdt,
-        leverage: this.leverage,
+        amountUsdt: effectiveAllocation,
+        leverage: effectiveLeverage,
         markPrice: currentPrice,
         tp: tpPrice,
         sl: slPrice,
@@ -379,7 +371,7 @@ export class StrategyEngine {
       }
 
       this.lastSignalTime = Date.now();
-      this.addLog(`⚡ Auto-Trade Executed: ${signal.action} on ${this.symbol} @ $${currentPrice.toFixed(2)} | Lev: ${this.leverage}x | ${signal.rationale}${isLive ? ' [LIVE BINANCE]' : ''}`, 'ORDER', pos);
+      this.addLog(`⚡ Auto-Trade Executed: ${signal.action} on ${tradeSymbol} @ $${currentPrice.toFixed(4)} | Margin: $${effectiveAllocation} (${effectiveLeverage}x) | ${signal.rationale}${isLive ? ' [LIVE BINANCE]' : ''}`, 'ORDER', pos);
 
       if (this.io) {
         this.io.emit('position_opened', pos);

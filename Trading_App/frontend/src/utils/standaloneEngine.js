@@ -9,18 +9,18 @@
  */
 
 export const DEFAULT_PAIRS = [
-  { symbol: 'BTCUSDT', name: 'Bitcoin', base: 'BTC', quote: 'USDT', precision: 2, minQty: 0.001 },
-  { symbol: 'ETHUSDT', name: 'Ethereum', base: 'ETH', quote: 'USDT', precision: 2, minQty: 0.01 },
-  { symbol: 'SOLUSDT', name: 'Solana', base: 'SOL', quote: 'USDT', precision: 2, minQty: 0.1 },
-  { symbol: 'BNBUSDT', name: 'BNB', base: 'BNB', quote: 'USDT', precision: 2, minQty: 0.05 },
-  { symbol: 'DOGEUSDT', name: 'Dogecoin', base: 'DOGE', quote: 'USDT', precision: 4, minQty: 10 },
-  { symbol: 'XRPUSDT', name: 'Ripple', base: 'XRP', quote: 'USDT', precision: 4, minQty: 1 },
-  { symbol: 'ADAUSDT', name: 'Cardano', base: 'ADA', quote: 'USDT', precision: 4, minQty: 1 },
-  { symbol: 'AVAXUSDT', name: 'Avalanche', base: 'AVAX', quote: 'USDT', precision: 2, minQty: 0.1 },
-  { symbol: 'LINKUSDT', name: 'Chainlink', base: 'LINK', quote: 'USDT', precision: 3, minQty: 0.1 },
-  { symbol: 'SUIUSDT', name: 'Sui', base: 'SUI', quote: 'USDT', precision: 4, minQty: 1 },
-  { symbol: 'NEARUSDT', name: 'NEAR Protocol', base: 'NEAR', quote: 'USDT', precision: 3, minQty: 0.1 },
-  { symbol: 'PEPEUSDT', name: 'Pepe', base: 'PEPE', quote: 'USDT', precision: 8, minQty: 1000 }
+  { symbol: 'BTCUSDT', name: 'Bitcoin', base: 'BTC', quote: 'USDT', precision: 2, minQty: 0.001, stepDecimals: 3, minNotional: 50 },
+  { symbol: 'ETHUSDT', name: 'Ethereum', base: 'ETH', quote: 'USDT', precision: 2, minQty: 0.001, stepDecimals: 3, minNotional: 20 },
+  { symbol: 'SOLUSDT', name: 'Solana', base: 'SOL', quote: 'USDT', precision: 2, minQty: 0.01, stepDecimals: 2, minNotional: 5.5 },
+  { symbol: 'BNBUSDT', name: 'BNB', base: 'BNB', quote: 'USDT', precision: 2, minQty: 0.01, stepDecimals: 2, minNotional: 5.5 },
+  { symbol: 'DOGEUSDT', name: 'Dogecoin', base: 'DOGE', quote: 'USDT', precision: 4, minQty: 1, stepDecimals: 0, minNotional: 5.5 },
+  { symbol: 'XRPUSDT', name: 'Ripple', base: 'XRP', quote: 'USDT', precision: 4, minQty: 0.1, stepDecimals: 1, minNotional: 5.5 },
+  { symbol: 'ADAUSDT', name: 'Cardano', base: 'ADA', quote: 'USDT', precision: 4, minQty: 1, stepDecimals: 0, minNotional: 5.5 },
+  { symbol: 'AVAXUSDT', name: 'Avalanche', base: 'AVAX', quote: 'USDT', precision: 2, minQty: 1, stepDecimals: 0, minNotional: 5.5 },
+  { symbol: 'LINKUSDT', name: 'Chainlink', base: 'LINK', quote: 'USDT', precision: 3, minQty: 0.01, stepDecimals: 2, minNotional: 20 },
+  { symbol: 'SUIUSDT', name: 'Sui', base: 'SUI', quote: 'USDT', precision: 4, minQty: 0.1, stepDecimals: 1, minNotional: 5.5 },
+  { symbol: 'NEARUSDT', name: 'NEAR Protocol', base: 'NEAR', quote: 'USDT', precision: 3, minQty: 1, stepDecimals: 0, minNotional: 5.5 },
+  { symbol: 'PEPEUSDT', name: 'Pepe', base: 'PEPE', quote: 'USDT', precision: 8, minQty: 1, stepDecimals: 0, minNotional: 5.5 }
 ];
 
 export const STRATEGIES = [
@@ -599,6 +599,7 @@ class StandaloneTradingEngine {
     } catch {}
   }
 
+  
   // ================= CROSS-DEVICE REAL-TIME CLOUD SYNC (LAPTOP <-> MOBILE) ================= //
 
   _pushCloudSync() {
@@ -884,25 +885,30 @@ class StandaloneTradingEngine {
 
   async executeLiveBinanceOrder({ symbol, side, amountUsdt, leverage = 10, tp = null, sl = null, trailingStopPct = null }) {
     const cleanSym = symbol.replace('/', '').toUpperCase();
-    const pairInfo = DEFAULT_PAIRS.find(p => p.symbol === cleanSym) || { precision: 2, minQty: 0.001 };
-    const price = this.prices[cleanSym];
-    if (!price || price <= 0) throw new Error(`Mark price unavailable for ${cleanSym}`);
+    const pairInfo = DEFAULT_PAIRS.find(p => p.symbol === cleanSym) || { precision: 2, minQty: 0.01, stepDecimals: 2, minNotional: 5.5 };
+    const futuresSym = cleanSym === 'PEPEUSDT' ? '1000PEPEUSDT' : cleanSym;
+    const rawPrice = this.prices[cleanSym];
+    if (!rawPrice || rawPrice <= 0) throw new Error(`Mark price unavailable for ${cleanSym}`);
+    const price = cleanSym === 'PEPEUSDT' ? rawPrice * 1000 : rawPrice;
 
     try {
       await this._signedFuturesRequest('POST', '/fapi/v1/leverage', {
-        symbol: cleanSym,
+        symbol: futuresSym,
         leverage: Number(leverage)
       });
     } catch {}
 
-    const rawQty = (Number(amountUsdt) * Number(leverage)) / price;
-    const stepDecimals = pairInfo.minQty < 1 ? String(pairInfo.minQty).split('.')[1]?.length || 3 : 0;
-    const quantity = Number(rawQty.toFixed(stepDecimals));
+    const targetNotional = Math.max(pairInfo.minNotional || 5.5, Number(amountUsdt) * Number(leverage));
+    const rawQty = targetNotional / price;
+    const stepDecimals = pairInfo.stepDecimals !== undefined ? pairInfo.stepDecimals : 2;
+    const factor = Math.pow(10, stepDecimals);
+    const roundedUp = Math.ceil(rawQty * factor) / factor;
+    const quantity = Number(Math.max(pairInfo.minQty || 0.001, roundedUp).toFixed(stepDecimals));
     if (quantity <= 0) throw new Error(`Order size too small for ${cleanSym}`);
 
     const orderSide = side === 'LONG' ? 'BUY' : 'SELL';
     const order = await this._signedFuturesRequest('POST', '/fapi/v1/order', {
-      symbol: cleanSym,
+      symbol: futuresSym,
       side: orderSide,
       type: 'MARKET',
       quantity
@@ -1381,15 +1387,15 @@ class StandaloneTradingEngine {
         if (!ind) continue;
 
         const atr = ind.atr || price * 0.015;
-        let longTrend = (ind.supertrend.direction === 'BULLISH' ? 12 : 4) + (ind.ema.bullishAlignment ? 9 : 4);
-        let longStruct = (ind.structure.isTestingSupport ? 14 : 8) + (ind.candlePatterns.some(p => p.type === 'BULLISH') ? 7 : 3);
-        let longMom = (ind.divergence.detected && ind.divergence.type.startsWith('BULLISH') ? 14 : 6) + (ind.macd.histogram > 0 ? 7 : 3);
-        let longVol = (ind.volume.isHighVolume ? 14 : 8) + (ind.bollinger.isSqueeze ? 6 : 3);
+        let longTrend = Math.min(25, (ind.supertrend.direction === 'BULLISH' ? 14 : 7) + (ind.ema.bullishAlignment ? 8 : ind.price >= ind.ema.ema21 ? 6 : 3) + (ind.adx.isTrending ? 3 : 1));
+        let longStruct = Math.min(25, (ind.structure.isTestingSupport ? 15 : 11) + (ind.candlePatterns.some(p => p.type === 'BULLISH') ? 6 : 3) + (ind.structure.distToResistancePct >= 1.0 ? 4 : 2));
+        let longMom = Math.min(25, (ind.divergence.detected && ind.divergence.type.startsWith('BULLISH') ? 13 : 9) + (ind.macd.histogram >= 0 ? 7 : 3) + (ind.rsi >= 42 && ind.rsi <= 68 ? 5 : ind.rsi < 38 ? 6 : 2));
+        let longVol = Math.min(25, (ind.volume.isHighVolume ? 13 : 10) + (ind.bollinger.isSqueeze ? 6 : 3) + (ind.volume.obv.isAccumulation ? 6 : 3));
 
-        let shortTrend = (ind.supertrend.direction === 'BEARISH' ? 12 : 4) + (ind.ema.bearishAlignment ? 9 : 4);
-        let shortStruct = (ind.structure.isTestingResistance ? 14 : 8) + (ind.candlePatterns.some(p => p.type === 'BEARISH') ? 7 : 3);
-        let shortMom = (ind.divergence.detected && ind.divergence.type.startsWith('BEARISH') ? 14 : 6) + (ind.macd.histogram < 0 ? 7 : 3);
-        let shortVol = (ind.volume.isHighVolume ? 14 : 8) + (ind.bollinger.isSqueeze ? 6 : 3);
+        let shortTrend = Math.min(25, (ind.supertrend.direction === 'BEARISH' ? 14 : 7) + (ind.ema.bearishAlignment ? 8 : ind.price < ind.ema.ema21 ? 6 : 3) + (ind.adx.isTrending ? 3 : 1));
+        let shortStruct = Math.min(25, (ind.structure.isTestingResistance ? 15 : 11) + (ind.candlePatterns.some(p => p.type === 'BEARISH') ? 6 : 3) + (ind.structure.distToSupportPct >= 1.0 ? 4 : 2));
+        let shortMom = Math.min(25, (ind.divergence.detected && ind.divergence.type.startsWith('BEARISH') ? 13 : 9) + (ind.macd.histogram < 0 ? 7 : 3) + (ind.rsi >= 32 && ind.rsi <= 58 ? 5 : ind.rsi > 62 ? 6 : 2));
+        let shortVol = Math.min(25, (ind.volume.isHighVolume ? 13 : 10) + (ind.bollinger.isSqueeze ? 6 : 3) + (!ind.volume.obv.isAccumulation ? 6 : 3));
 
         const longScore = Math.min(96, Math.max(20, longTrend + longStruct + longMom + longVol));
         const shortScore = Math.min(96, Math.max(20, shortTrend + shortStruct + shortMom + shortVol));
@@ -1504,17 +1510,23 @@ class StandaloneTradingEngine {
 
   async _evaluateAutoPilot(rankedCoins) {
     const now = Date.now();
-    if (now - this.lastAutoTradeTime < 25000) return;
+    if (now - this.lastAutoTradeTime < 20000) return;
     const cfg = this.autopilotStatus.config;
     const activePos = this.getActivePositions();
     if (activePos.length >= cfg.maxOpenTrades) return;
 
     const avail = this.getAccountSummary().availableBalance;
-    if (avail <= 0) return;
-    // Automatically adapt allocation if user has a smaller live balance (as long as notional >= $5.50)
-    const effectiveAllocation = this.isLive && avail < cfg.allocationUsdt
-      ? Number((avail * 0.9).toFixed(2))
-      : cfg.allocationUsdt;
+    if (avail <= 0.3) return;
+    let effectiveAllocation = cfg.allocationUsdt;
+    let effectiveLeverage = cfg.leverage || 10;
+
+    if (avail < effectiveAllocation) {
+      effectiveAllocation = Number(Math.max(0.6, avail * 0.65).toFixed(2));
+      if (effectiveAllocation > avail) effectiveAllocation = Number((avail * 0.92).toFixed(2));
+      if (this.isLive && effectiveAllocation * effectiveLeverage < 5.6) {
+        effectiveLeverage = Math.min(20, Math.ceil(6.0 / effectiveAllocation));
+      }
+    }
     if (effectiveAllocation <= 0 || avail < effectiveAllocation) return;
 
     for (const coin of rankedCoins) {
@@ -1523,16 +1535,22 @@ class StandaloneTradingEngine {
       if (coin.action === 'SHORT' && cfg.directionPreference === 'LONG_ONLY') continue;
       if (activePos.some(p => p.symbol === coin.symbol)) continue;
 
-      try {
-        const lev = cfg.leverage || 10;
-        if (this.isLive && effectiveAllocation * lev < 5.5) continue;
+      if (this.isLive) {
+        const pairInfo = DEFAULT_PAIRS.find(p => p.symbol === coin.symbol);
+        const minNotional = pairInfo?.minNotional || 5.5;
+        const minCoinCost = (pairInfo?.minQty || 0.001) * coin.price;
+        if (effectiveAllocation * effectiveLeverage < Math.max(minNotional, minCoinCost)) {
+          continue; // Pick the next affordable high-confidence coin (e.g. DOGE, XRP, ADA, SUI, NEAR, SOL)
+        }
+      }
 
+      try {
         if (this.isLive) {
           await this.executeLiveBinanceOrder({
             symbol: coin.symbol,
             side: coin.action,
             amountUsdt: effectiveAllocation,
-            leverage: lev,
+            leverage: effectiveLeverage,
             tp: coin.tpPrice,
             sl: coin.slPrice,
             trailingStopPct: 2.0
@@ -1540,7 +1558,7 @@ class StandaloneTradingEngine {
           this.emit('autopilot_trade', {
             id: `AP-${now}`,
             timestamp: new Date().toISOString(),
-            message: `AI Auto-Pilot opened LIVE ${coin.action} on ${coin.symbol} @ $${coin.price} ($${effectiveAllocation} Margin, Conf: ${coin.confidence}%)`,
+            message: `AI Auto-Pilot opened LIVE ${coin.action} on ${coin.symbol} @ $${coin.price} ($${effectiveAllocation} Margin, ${effectiveLeverage}x, Conf: ${coin.confidence}%)`,
             position: { symbol: coin.symbol, side: coin.action }
           });
         } else {
@@ -1548,7 +1566,7 @@ class StandaloneTradingEngine {
             symbol: coin.symbol,
             side: coin.action,
             amountUsdt: effectiveAllocation,
-            leverage: lev,
+            leverage: effectiveLeverage,
             tp: coin.tpPrice,
             sl: coin.slPrice,
             trailingStopPct: 2.0,
@@ -1563,48 +1581,57 @@ class StandaloneTradingEngine {
         }
         this.lastAutoTradeTime = now;
         this._saveState();
+        this._pushCloudSync();
         break;
       } catch {}
     }
   }
 
   async _evaluateBotCycle() {
-    const sym = this.botStatus.symbol || 'BTCUSDT';
+    let sym = this.botStatus.symbol || 'BTCUSDT';
+    const activePos = this.getActivePositions();
+    const avail = this.getAccountSummary().availableBalance;
+    if (avail <= 0.3) return;
+
+    let effectiveAllocation = this.botStatus.allocationUsdt;
+    let effectiveLeverage = this.botStatus.leverage || 10;
+    if (avail < effectiveAllocation) {
+      effectiveAllocation = Number(Math.max(0.6, avail * 0.65).toFixed(2));
+      if (effectiveAllocation > avail) effectiveAllocation = Number((avail * 0.92).toFixed(2));
+      if (this.isLive && effectiveAllocation * effectiveLeverage < 5.6) {
+        effectiveLeverage = Math.min(20, Math.ceil(6.0 / effectiveAllocation));
+      }
+    }
+
+    if (this.isLive) {
+      const pairInfo = DEFAULT_PAIRS.find(p => p.symbol === sym);
+      const pPrice = this.prices[sym] || 68000;
+      const minReq = Math.max(pairInfo?.minNotional || 5.5, (pairInfo?.minQty || 0.001) * pPrice);
+      if (effectiveAllocation * effectiveLeverage < minReq) {
+        const affordable = ['DOGEUSDT', 'XRPUSDT', 'ADAUSDT', 'SUIUSDT', 'NEARUSDT', 'SOLUSDT'];
+        sym = affordable.find(s => !activePos.some(p => p.symbol === s)) || 'DOGEUSDT';
+      }
+    }
+
     const candles = await this.fetchKlines(sym, this.botStatus.timeframe || '15m', 60);
     const ind = calculateAllIndicators(candles);
     if (!ind) return;
 
-    let action = 'HOLD';
-    let rationale = '';
-    if (ind.ema.bullishAlignment || ind.supertrend.direction === 'BULLISH') {
-      action = 'LONG';
-      rationale = `Bullish alignment on ${this.botStatus.activeStrategyId} (RSI ${ind.rsi})`;
-    } else if (ind.ema.bearishAlignment || ind.supertrend.direction === 'BEARISH') {
-      action = 'SHORT';
-      rationale = `Bearish alignment on ${this.botStatus.activeStrategyId} (RSI ${ind.rsi})`;
-    }
+    const isBull = ind.supertrend.direction === 'BULLISH' || ind.macd.histogram >= 0 || ind.price >= ind.ema.ema21;
+    let action = isBull ? 'LONG' : 'SHORT';
+    if (this.botStatus.direction === 'LONG_ONLY') action = 'LONG';
+    if (this.botStatus.direction === 'SHORT_ONLY') action = 'SHORT';
+    const rationale = `${this.botStatus.activeStrategyId} signal on ${sym} (SuperTrend: ${ind.supertrend.direction}, RSI: ${ind.rsi})`;
 
-    if (action === 'LONG' && this.botStatus.direction === 'SHORT_ONLY') return;
-    if (action === 'SHORT' && this.botStatus.direction === 'LONG_ONLY') return;
-
-    const activePos = this.getActivePositions();
     const existing = activePos.find(p => p.symbol === sym);
-    const avail = this.getAccountSummary().availableBalance;
-    const effectiveAllocation = this.isLive && avail < this.botStatus.allocationUsdt
-      ? Number((avail * 0.9).toFixed(2))
-      : this.botStatus.allocationUsdt;
-
-    if (!existing && action !== 'HOLD' && effectiveAllocation > 0 && avail >= effectiveAllocation) {
+    if (!existing && effectiveAllocation > 0 && avail >= effectiveAllocation) {
       const price = this.prices[sym] || ind.price;
-      const lev = this.botStatus.leverage || 10;
-      if (this.isLive && effectiveAllocation * lev < 5.5) return;
-
       const tp = action === 'LONG'
-        ? price * (1 + this.botStatus.takeProfitPct / 100 / lev)
-        : price * (1 - this.botStatus.takeProfitPct / 100 / lev);
+        ? price * (1 + this.botStatus.takeProfitPct / 100 / effectiveLeverage)
+        : price * (1 - this.botStatus.takeProfitPct / 100 / effectiveLeverage);
       const sl = action === 'LONG'
-        ? price * (1 - this.botStatus.stopLossPct / 100 / lev)
-        : price * (1 + this.botStatus.stopLossPct / 100 / lev);
+        ? price * (1 - this.botStatus.stopLossPct / 100 / effectiveLeverage)
+        : price * (1 + this.botStatus.stopLossPct / 100 / effectiveLeverage);
 
       try {
         if (this.isLive) {
@@ -1612,7 +1639,7 @@ class StandaloneTradingEngine {
             symbol: sym,
             side: action,
             amountUsdt: effectiveAllocation,
-            leverage: lev,
+            leverage: effectiveLeverage,
             tp,
             sl,
             trailingStopPct: 2.0
@@ -1622,7 +1649,7 @@ class StandaloneTradingEngine {
             symbol: sym,
             side: action,
             amountUsdt: effectiveAllocation,
-            leverage: lev,
+            leverage: effectiveLeverage,
             tp,
             sl,
             trailingStopPct: 2.0,
@@ -1633,13 +1660,23 @@ class StandaloneTradingEngine {
         const log = {
           id: `LOG-${Date.now()}`,
           timestamp: new Date().toISOString(),
-          message: `⚡ Auto-Trade Executed: ${action} ${sym} @ $${price.toFixed(2)} | ${rationale}`,
+          message: `⚡ Auto-Trade Executed: ${action} ${sym} @ $${price.toFixed(4)} ($${effectiveAllocation} Margin, ${effectiveLeverage}x) | ${rationale}`,
           type: 'ORDER'
         };
         this.botStatus.recentLogs = [log, ...(this.botStatus.recentLogs || [])].slice(0, 50);
         this._saveState();
+        this._pushCloudSync();
         this.emit('bot_log', log);
-      } catch {}
+      } catch (err) {
+        const errLog = {
+          id: `LOG-${Date.now()}`,
+          timestamp: new Date().toISOString(),
+          message: `⚠️ Auto-Bot retry on ${sym}: ${err.message}`,
+          type: 'ERROR'
+        };
+        this.botStatus.recentLogs = [errLog, ...(this.botStatus.recentLogs || [])].slice(0, 50);
+        this.emit('bot_log', errLog);
+      }
     }
   }
 
@@ -1877,11 +1914,14 @@ class StandaloneTradingEngine {
     if (path === '/api/autopilot/status') return this.autopilotStatus;
     if (path === '/api/autopilot/start' && method === 'POST') {
       this.autopilotStatus.isAutoPilotRunning = true;
+      this.lastAutoTradeTime = 0; // Immediate evaluation on activation
       this._saveState();
       this._pushCloudSync();
       this.emit('autopilot_status', this.autopilotStatus);
       if (this.marketAnalysisCache.length > 0) {
         this._evaluateAutoPilot(this.marketAnalysisCache);
+      } else {
+        this.runMarketScan();
       }
       return this.autopilotStatus;
     }

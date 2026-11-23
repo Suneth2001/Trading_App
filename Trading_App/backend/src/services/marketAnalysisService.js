@@ -42,8 +42,14 @@ export class MarketAnalysisService {
 
   startAutoPilot() {
     this.isAutoPilotRunning = true;
+    this.lastAutoTradeTime = 0; // Allow immediate execution on activation
     if (this.io) {
       this.io.emit('autopilot_status', this.getAutoPilotStatus());
+    }
+    if (this.analysisCache && this.analysisCache.length > 0) {
+      this.evaluateAutoPilot(this.analysisCache).catch(() => {});
+    } else {
+      this.runFullScan().catch(() => {});
     }
     return this.getAutoPilotStatus();
   }
@@ -148,79 +154,79 @@ export class MarketAnalysisService {
 
     // --- LONG PILLARS (0 to 25 pts each) ---
     // Pillar 1: Trend
-    let longPillarTrend = 0;
-    if (htfScoreBonus > 0) longPillarTrend += 9;
-    if (supertrend.direction === 'BULLISH') longPillarTrend += 6;
-    if (ema.bullishAlignment || ema.goldenCross) longPillarTrend += 5;
-    if (ema.priceAboveEma200) longPillarTrend += 3;
+    let longPillarTrend = 8;
+    if (htfScoreBonus > 0) longPillarTrend += 7;
+    if (supertrend.direction === 'BULLISH') longPillarTrend += 5;
+    if (ema.bullishAlignment || ema.goldenCross) longPillarTrend += 4;
+    if (ema.priceAboveEma200) longPillarTrend += 2;
     if (adx.isTrending && adx.trendDirection === 'BULLISH') longPillarTrend += 2;
-    longPillarTrend = Math.min(25, Math.max(0, longPillarTrend));
+    longPillarTrend = Math.min(25, Math.max(5, longPillarTrend));
 
     // Pillar 2: Structure & Key Levels
-    let longPillarStructure = 0;
-    if (structure.isTestingSupport) longPillarStructure += 11;
-    if (candlePatterns.some(p => p.type === 'BULLISH')) longPillarStructure += 7;
-    if (structure.status === 'BREAKOUT_RESISTANCE') longPillarStructure += 8;
-    if (structure.distToResistancePct >= 1.8) longPillarStructure += 4;
-    if (structure.isTestingResistance && structure.status !== 'BREAKOUT_RESISTANCE') longPillarStructure -= 8;
-    longPillarStructure = Math.min(25, Math.max(0, longPillarStructure));
+    let longPillarStructure = 10;
+    if (structure.isTestingSupport) longPillarStructure += 9;
+    if (candlePatterns.some(p => p.type === 'BULLISH')) longPillarStructure += 6;
+    if (structure.status === 'BREAKOUT_RESISTANCE') longPillarStructure += 7;
+    if (structure.distToResistancePct >= 1.2) longPillarStructure += 5;
+    if (structure.isTestingResistance && structure.status !== 'BREAKOUT_RESISTANCE') longPillarStructure -= 4;
+    longPillarStructure = Math.min(25, Math.max(5, longPillarStructure));
 
     // Pillar 3: Momentum & Divergence
-    let longPillarMomentum = 0;
-    if (divergence.detected && divergence.type.startsWith('BULLISH')) longPillarMomentum += 14;
-    if (stochRsi.isBullishCross) longPillarMomentum += 6;
-    if (macd.crossover === 'BULLISH' || macd.isExpandingBullish) longPillarMomentum += 5;
-    if (rsi >= 46 && rsi <= 64) longPillarMomentum += 4;
-    if (rsi < 30 && (divergence.detected || candlePatterns.length > 0)) longPillarMomentum += 6;
-    if (rsi > 72) longPillarMomentum -= 10;
-    longPillarMomentum = Math.min(25, Math.max(0, longPillarMomentum));
+    let longPillarMomentum = 9;
+    if (divergence.detected && divergence.type.startsWith('BULLISH')) longPillarMomentum += 11;
+    if (stochRsi.isBullishCross || stochRsi.k > stochRsi.d) longPillarMomentum += 5;
+    if (macd.crossover === 'BULLISH' || macd.isExpandingBullish || macd.histogram > 0) longPillarMomentum += 5;
+    if (rsi >= 42 && rsi <= 68) longPillarMomentum += 4;
+    if (rsi < 35) longPillarMomentum += 6;
+    if (rsi > 76) longPillarMomentum -= 6;
+    longPillarMomentum = Math.min(25, Math.max(5, longPillarMomentum));
 
     // Pillar 4: Volume & Volatility
-    let longPillarVolume = 0;
-    if (volume.isHighVolume && ind15m.price > ind15m.prevPrice) longPillarVolume += 10;
-    if (volume.obv.isAccumulation) longPillarVolume += 7;
-    if (bollinger.isSqueeze) longPillarVolume += 5;
-    if (volume.surgeRatio > 2.0) longPillarVolume += 3;
-    longPillarVolume = Math.min(25, Math.max(0, longPillarVolume));
+    let longPillarVolume = 10;
+    if (volume.isHighVolume && ind15m.price >= ind15m.prevPrice) longPillarVolume += 7;
+    if (volume.obv.isAccumulation) longPillarVolume += 5;
+    if (bollinger.isSqueeze) longPillarVolume += 4;
+    if (volume.surgeRatio > 1.15) longPillarVolume += 3;
+    longPillarVolume = Math.min(25, Math.max(5, longPillarVolume));
 
     let longRawScore = longPillarTrend + longPillarStructure + longPillarMomentum + longPillarVolume;
 
     // --- SHORT PILLARS (0 to 25 pts each) ---
     // Pillar 1: Trend
-    let shortPillarTrend = 0;
-    if (htfScoreBonus < 0) shortPillarTrend += 9;
-    if (supertrend.direction === 'BEARISH') shortPillarTrend += 6;
-    if (ema.bearishAlignment || ema.deathCross) shortPillarTrend += 5;
-    if (!ema.priceAboveEma200) shortPillarTrend += 3;
+    let shortPillarTrend = 8;
+    if (htfScoreBonus < 0) shortPillarTrend += 7;
+    if (supertrend.direction === 'BEARISH') shortPillarTrend += 5;
+    if (ema.bearishAlignment || ema.deathCross) shortPillarTrend += 4;
+    if (!ema.priceAboveEma200) shortPillarTrend += 2;
     if (adx.isTrending && adx.trendDirection === 'BEARISH') shortPillarTrend += 2;
-    shortPillarTrend = Math.min(25, Math.max(0, shortPillarTrend));
+    shortPillarTrend = Math.min(25, Math.max(5, shortPillarTrend));
 
     // Pillar 2: Structure & Key Levels
-    let shortPillarStructure = 0;
-    if (structure.isTestingResistance) shortPillarStructure += 11;
-    if (candlePatterns.some(p => p.type === 'BEARISH')) shortPillarStructure += 7;
-    if (structure.status === 'BREAKDOWN_SUPPORT') shortPillarStructure += 8;
-    if (structure.distToSupportPct >= 1.8) shortPillarStructure += 4;
-    if (structure.isTestingSupport && structure.status !== 'BREAKDOWN_SUPPORT') shortPillarStructure -= 8;
-    shortPillarStructure = Math.min(25, Math.max(0, shortPillarStructure));
+    let shortPillarStructure = 10;
+    if (structure.isTestingResistance) shortPillarStructure += 9;
+    if (candlePatterns.some(p => p.type === 'BEARISH')) shortPillarStructure += 6;
+    if (structure.status === 'BREAKDOWN_SUPPORT') shortPillarStructure += 7;
+    if (structure.distToSupportPct >= 1.2) shortPillarStructure += 5;
+    if (structure.isTestingSupport && structure.status !== 'BREAKDOWN_SUPPORT') shortPillarStructure -= 4;
+    shortPillarStructure = Math.min(25, Math.max(5, shortPillarStructure));
 
     // Pillar 3: Momentum & Divergence
-    let shortPillarMomentum = 0;
-    if (divergence.detected && divergence.type.startsWith('BEARISH')) shortPillarMomentum += 14;
-    if (stochRsi.isBearishCross) shortPillarMomentum += 6;
-    if (macd.crossover === 'BEARISH' || macd.isContractingBearish) shortPillarMomentum += 5;
-    if (rsi >= 36 && rsi <= 54) shortPillarMomentum += 4;
-    if (rsi > 70 && (divergence.detected || candlePatterns.length > 0)) shortPillarMomentum += 6;
-    if (rsi < 28) shortPillarMomentum -= 10;
-    shortPillarMomentum = Math.min(25, Math.max(0, shortPillarMomentum));
+    let shortPillarMomentum = 9;
+    if (divergence.detected && divergence.type.startsWith('BEARISH')) shortPillarMomentum += 11;
+    if (stochRsi.isBearishCross || stochRsi.k < stochRsi.d) shortPillarMomentum += 5;
+    if (macd.crossover === 'BEARISH' || macd.isContractingBearish || macd.histogram < 0) shortPillarMomentum += 5;
+    if (rsi >= 32 && rsi <= 58) shortPillarMomentum += 4;
+    if (rsi > 65) shortPillarMomentum += 6;
+    if (rsi < 24) shortPillarMomentum -= 6;
+    shortPillarMomentum = Math.min(25, Math.max(5, shortPillarMomentum));
 
     // Pillar 4: Volume & Volatility
-    let shortPillarVolume = 0;
-    if (volume.isHighVolume && ind15m.price < ind15m.prevPrice) shortPillarVolume += 10;
-    if (!volume.obv.isAccumulation) shortPillarVolume += 7;
-    if (bollinger.isSqueeze) shortPillarVolume += 5;
-    if (volume.surgeRatio > 2.0) shortPillarVolume += 3;
-    shortPillarVolume = Math.min(25, Math.max(0, shortPillarVolume));
+    let shortPillarVolume = 10;
+    if (volume.isHighVolume && ind15m.price <= ind15m.prevPrice) shortPillarVolume += 7;
+    if (!volume.obv.isAccumulation) shortPillarVolume += 5;
+    if (bollinger.isSqueeze) shortPillarVolume += 4;
+    if (volume.surgeRatio > 1.15) shortPillarVolume += 3;
+    shortPillarVolume = Math.min(25, Math.max(5, shortPillarVolume));
 
     let shortRawScore = shortPillarTrend + shortPillarStructure + shortPillarMomentum + shortPillarVolume;
 
@@ -446,8 +452,8 @@ export class MarketAnalysisService {
    */
   async evaluateAutoPilot(rankedCoins) {
     const now = Date.now();
-    // Cooldown: at least 45 seconds between auto trades
-    if (now - this.lastAutoTradeTime < 45000) return;
+    // Cooldown: at least 20 seconds between auto trades
+    if (now - this.lastAutoTradeTime < 20000) return;
 
     const isLive = paperTrading.isLive && binanceService.liveExchange;
 
@@ -455,11 +461,20 @@ export class MarketAnalysisService {
     const currentPositions = isLive ? await binanceService.getLivePositions() : paperTrading.positions;
     if (currentPositions.length >= this.autoPilotConfig.maxOpenTrades) return;
 
+    let effectiveAllocation = this.autoPilotConfig.allocationUsdt;
+    let effectiveLeverage = this.autoPilotConfig.leverage || 10;
+
     if (isLive) {
       const liveBal = await binanceService.getLiveBalance();
       const availableMargin = liveBal?.availableBalance || 0;
-      if (availableMargin < this.autoPilotConfig.allocationUsdt) {
-        return;
+      if (availableMargin <= 0.3) return;
+      if (availableMargin < effectiveAllocation) {
+        // Adapt margin to fit user's available wallet balance (e.g. $1.45 wallet -> ~$0.75 margin at 10x = $7.50 notional)
+        effectiveAllocation = Number(Math.max(0.6, availableMargin * 0.65).toFixed(2));
+        if (effectiveAllocation > availableMargin) effectiveAllocation = Number((availableMargin * 0.92).toFixed(2));
+        if (effectiveAllocation * effectiveLeverage < 5.6) {
+          effectiveLeverage = Math.min(20, Math.ceil(6.0 / effectiveAllocation));
+        }
       }
     }
 
@@ -470,6 +485,17 @@ export class MarketAnalysisService {
       // Filter by direction preference
       if (coin.action === 'LONG' && this.autoPilotConfig.directionPreference === 'SHORT_ONLY') continue;
       if (coin.action === 'SHORT' && this.autoPilotConfig.directionPreference === 'LONG_ONLY') continue;
+
+      // In Live mode, skip high-minNotional pairs (BTC/ETH/LINK) if position notional < pair's minNotional
+      if (isLive) {
+        const pairInfo = CONFIG.DEFAULT_PAIRS.find(p => p.symbol === coin.symbol);
+        const minNotional = pairInfo?.minNotional || 5.5;
+        const minCoinCost = (pairInfo?.minQty || 0.001) * coin.price;
+        const requiredNotional = Math.max(minNotional, minCoinCost);
+        if (effectiveAllocation * effectiveLeverage < requiredNotional) {
+          continue; // Automatically pick the next high-confidence affordable pair (e.g. DOGE, XRP, ADA, SUI, SOL, NEAR)
+        }
+      }
 
       // Protection: Skip coins experiencing falling knife capitulation or severe trap warnings
       if (coin.isFallingKnife) continue;
@@ -486,16 +512,16 @@ export class MarketAnalysisService {
           liveOrder = await binanceService.executeLiveOrder({
             symbol: coin.symbol,
             side: coin.action,
-            amountUsdt: this.autoPilotConfig.allocationUsdt,
-            leverage: this.autoPilotConfig.leverage
+            amountUsdt: effectiveAllocation,
+            leverage: effectiveLeverage
           });
         }
 
         const pos = paperTrading.openPosition({
           symbol: coin.symbol,
           side: coin.action,
-          amountUsdt: this.autoPilotConfig.allocationUsdt,
-          leverage: this.autoPilotConfig.leverage,
+          amountUsdt: effectiveAllocation,
+          leverage: effectiveLeverage,
           markPrice: coin.price,
           tp: coin.tpPrice,
           sl: coin.slPrice,

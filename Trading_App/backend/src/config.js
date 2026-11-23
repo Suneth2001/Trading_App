@@ -1,18 +1,18 @@
 export const CONFIG = {
   PORT: process.env.PORT || 5000,
   DEFAULT_PAIRS: [
-    { symbol: 'BTCUSDT', name: 'Bitcoin', base: 'BTC', quote: 'USDT', precision: 2, minQty: 0.001 },
-    { symbol: 'ETHUSDT', name: 'Ethereum', base: 'ETH', quote: 'USDT', precision: 2, minQty: 0.01 },
-    { symbol: 'SOLUSDT', name: 'Solana', base: 'SOL', quote: 'USDT', precision: 2, minQty: 0.1 },
-    { symbol: 'BNBUSDT', name: 'BNB', base: 'BNB', quote: 'USDT', precision: 2, minQty: 0.05 },
-    { symbol: 'DOGEUSDT', name: 'Dogecoin', base: 'DOGE', quote: 'USDT', precision: 4, minQty: 10 },
-    { symbol: 'XRPUSDT', name: 'Ripple', base: 'XRP', quote: 'USDT', precision: 4, minQty: 1 },
-    { symbol: 'ADAUSDT', name: 'Cardano', base: 'ADA', quote: 'USDT', precision: 4, minQty: 1 },
-    { symbol: 'AVAXUSDT', name: 'Avalanche', base: 'AVAX', quote: 'USDT', precision: 2, minQty: 0.1 },
-    { symbol: 'LINKUSDT', name: 'Chainlink', base: 'LINK', quote: 'USDT', precision: 3, minQty: 0.1 },
-    { symbol: 'SUIUSDT', name: 'Sui', base: 'SUI', quote: 'USDT', precision: 4, minQty: 1 },
-    { symbol: 'NEARUSDT', name: 'NEAR Protocol', base: 'NEAR', quote: 'USDT', precision: 3, minQty: 0.1 },
-    { symbol: 'PEPEUSDT', name: 'Pepe', base: 'PEPE', quote: 'USDT', precision: 8, minQty: 1000 }
+    { symbol: 'BTCUSDT', name: 'Bitcoin', base: 'BTC', quote: 'USDT', precision: 2, minQty: 0.001, stepDecimals: 3, minNotional: 50 },
+    { symbol: 'ETHUSDT', name: 'Ethereum', base: 'ETH', quote: 'USDT', precision: 2, minQty: 0.001, stepDecimals: 3, minNotional: 20 },
+    { symbol: 'SOLUSDT', name: 'Solana', base: 'SOL', quote: 'USDT', precision: 2, minQty: 0.01, stepDecimals: 2, minNotional: 5.5 },
+    { symbol: 'BNBUSDT', name: 'BNB', base: 'BNB', quote: 'USDT', precision: 2, minQty: 0.01, stepDecimals: 2, minNotional: 5.5 },
+    { symbol: 'DOGEUSDT', name: 'Dogecoin', base: 'DOGE', quote: 'USDT', precision: 4, minQty: 1, stepDecimals: 0, minNotional: 5.5 },
+    { symbol: 'XRPUSDT', name: 'Ripple', base: 'XRP', quote: 'USDT', precision: 4, minQty: 0.1, stepDecimals: 1, minNotional: 5.5 },
+    { symbol: 'ADAUSDT', name: 'Cardano', base: 'ADA', quote: 'USDT', precision: 4, minQty: 1, stepDecimals: 0, minNotional: 5.5 },
+    { symbol: 'AVAXUSDT', name: 'Avalanche', base: 'AVAX', quote: 'USDT', precision: 2, minQty: 1, stepDecimals: 0, minNotional: 5.5 },
+    { symbol: 'LINKUSDT', name: 'Chainlink', base: 'LINK', quote: 'USDT', precision: 3, minQty: 0.01, stepDecimals: 2, minNotional: 20 },
+    { symbol: 'SUIUSDT', name: 'Sui', base: 'SUI', quote: 'USDT', precision: 4, minQty: 0.1, stepDecimals: 1, minNotional: 5.5 },
+    { symbol: 'NEARUSDT', name: 'NEAR Protocol', base: 'NEAR', quote: 'USDT', precision: 3, minQty: 1, stepDecimals: 0, minNotional: 5.5 },
+    { symbol: 'PEPEUSDT', name: 'Pepe', base: 'PEPE', quote: 'USDT', precision: 8, minQty: 1, stepDecimals: 0, minNotional: 5.5 }
   ],
   AUTO_MARKET_SCANNER: {
     SCAN_INTERVAL_MS: 5000,

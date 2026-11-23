@@ -1,4 +1,4 @@
-const CACHE_NAME = 'apexalgo-ios-pwa-v7';
+const CACHE_NAME = 'apexalgo-ios-pwa-v8';
 const CORE_ASSETS = [
   './',
   './index.html',

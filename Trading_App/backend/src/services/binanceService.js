@@ -320,27 +320,35 @@ export class BinanceService {
       throw new Error('Futures trading permission is missing! Please select "Restrict access to trusted IPs only" on Binance, add IP 112.134.246.225, and check "Enable Futures".');
     }
     const cleanSym = symbol.replace('/', '').toUpperCase();
-    const marketSymbol = `${cleanSym.replace('USDT', '')}/USDT:USDT`;
+    const pairInfo = CONFIG.DEFAULT_PAIRS.find(p => p.symbol === cleanSym) || { stepDecimals: 2, minQty: 0.01, minNotional: 5.5 };
+    const futuresSym = cleanSym === 'PEPEUSDT' ? '1000PEPEUSDT' : cleanSym;
+    const marketSymbol = `${futuresSym.replace('USDT', '')}/USDT:USDT`;
     
     try {
       await this.liveExchange.setLeverage(leverage, marketSymbol);
     } catch {
       try {
-        await this.liveExchange.setLeverage(leverage, `${cleanSym.replace('USDT', '')}/USDT`);
+        await this.liveExchange.setLeverage(leverage, `${futuresSym.replace('USDT', '')}/USDT`);
       } catch (e) {
         console.warn('[Binance Live] Leverage setting note:', e.message);
       }
     }
 
-    const price = this.getPrice(symbol);
-    const quantity = Number(((amountUsdt * leverage) / price).toFixed(4));
+    const rawPrice = this.getPrice(cleanSym);
+    const price = cleanSym === 'PEPEUSDT' ? rawPrice * 1000 : rawPrice;
+    const notional = Math.max(pairInfo.minNotional || 5.5, amountUsdt * leverage);
+    const rawQty = notional / price;
+    const decimals = pairInfo.stepDecimals !== undefined ? pairInfo.stepDecimals : 2;
+    const factor = Math.pow(10, decimals);
+    const quantity = Math.max(pairInfo.minQty || 0.001, Math.ceil(rawQty * factor) / factor);
+    const fixedQty = Number(quantity.toFixed(decimals));
     const orderSide = side === 'LONG' ? 'buy' : 'sell';
 
     const order = await this.liveExchange.createOrder(
       marketSymbol,
       'market',
       orderSide,
-      quantity
+      fixedQty
     );
     this._cachedLiveBal = null;
     this._cachedLivePositions = null;
