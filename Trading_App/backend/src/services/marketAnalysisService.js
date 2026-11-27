@@ -576,7 +576,9 @@ export class MarketAnalysisService {
               symbol: coin.symbol,
               side: coin.action,
               amountUsdt: effectiveAllocation,
-              leverage: effectiveLeverage
+              leverage: effectiveLeverage,
+              tp: coin.tpPrice,
+              sl: coin.slPrice
             });
 
             const cleanSym = coin.symbol.replace('/', '').toUpperCase();

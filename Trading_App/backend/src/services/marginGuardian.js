@@ -16,6 +16,7 @@ export class MarginGuardian {
     this.maxAccountDrawdownPct = CONFIG.MARGIN_GUARDIAN.MAX_ACCOUNT_DRAWDOWN_PCT;    // 15%
     this.alertLogs = [];
     this.positionTargets = {}; // { [positionKey]: { tp, sl, trailingStopPct, highestRoePct } }
+    this.closingInProgress = new Set();
   }
 
   setSettings(settings) {
@@ -216,8 +217,12 @@ export class MarginGuardian {
         }
       }
 
-      // EXECUTE AUTO-CLOSE IF TRIGGERED
+      // EXECUTE AUTO-CLOSE IF TRIGGERED (with per-position lock to prevent duplicate -2022 close orders)
       if (shouldClose) {
+        const lockKey = pos.id || pos.symbol;
+        if (this.closingInProgress.has(lockKey)) continue;
+        this.closingInProgress.add(lockKey);
+
         try {
           const isLivePos = isLive || pos.source === 'BINANCE_LIVE' || (pos.id && pos.id.startsWith('BINANCE-'));
           let closedResult = null;
@@ -282,6 +287,8 @@ export class MarginGuardian {
           }
         } catch (err) {
           console.error(`[Margin Guardian] Error auto-closing position ${pos.id}:`, err.message);
+        } finally {
+          this.closingInProgress.delete(lockKey);
         }
       }
     }

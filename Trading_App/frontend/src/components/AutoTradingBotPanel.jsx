@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Play, Square, Bot, Zap, ArrowUpRight, ArrowDownRight, Compass, Radio } from 'lucide-react';
+import { Play, Square, Bot, Zap, ArrowUpRight, ArrowDownRight, Compass, Radio, Cloud, Smartphone, Sun } from 'lucide-react';
 
 export function AutoTradingBotPanel({
   botStatus,
@@ -8,6 +8,9 @@ export function AutoTradingBotPanel({
   activeSymbol = 'BTCUSDT',
   isLive = false,
   availableBalance = 0,
+  cloudEngine = { online: false },
+  wakeLockEnabled = false,
+  onToggleWakeLock,
   onStartBot,
   onStopBot,
   onUpdateConfig
@@ -140,6 +143,51 @@ export function AutoTradingBotPanel({
           >
             <Play size={16} fill="currentColor" />
             START AUTO BOT
+          </button>
+        )}
+      </div>
+
+      {/* 24/7 Background Execution Status Bar */}
+      <div style={{
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        flexWrap: 'wrap',
+        gap: '8px',
+        padding: '9px 12px',
+        borderRadius: 'var(--radius-sm)',
+        background: cloudEngine?.online ? 'rgba(0, 245, 160, 0.07)' : 'rgba(245, 158, 11, 0.08)',
+        border: `1px solid ${cloudEngine?.online ? 'rgba(0, 245, 160, 0.28)' : 'rgba(245, 158, 11, 0.28)'}`,
+        fontSize: '11px'
+      }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '7px', color: cloudEngine?.online ? '#00F5A0' : '#FBBF24', fontWeight: 700 }}>
+          {cloudEngine?.online ? <Cloud size={14} /> : <Smartphone size={14} />}
+          <span>
+            {cloudEngine?.online
+              ? '☁️ 24/7 Background Engine ONLINE — Safe to close phone app (PC/Cloud Server + Binance Native TP/SL active)'
+              : '📱 Phone Standalone Mode — Native Binance TP/SL active; keep screen awake or leave PC 24/7 Engine ON to open new trades when closed'}
+          </span>
+        </div>
+        {!cloudEngine?.online && onToggleWakeLock && (
+          <button
+            type="button"
+            onClick={onToggleWakeLock}
+            style={{
+              background: wakeLockEnabled ? 'rgba(0, 245, 160, 0.16)' : 'rgba(255,255,255,0.06)',
+              border: `1px solid ${wakeLockEnabled ? '#00F5A0' : 'var(--border)'}`,
+              color: wakeLockEnabled ? '#00F5A0' : '#E2E8F0',
+              borderRadius: '5px',
+              padding: '4px 9px',
+              fontSize: '10.5px',
+              fontWeight: 700,
+              cursor: 'pointer',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '4px'
+            }}
+          >
+            <Sun size={12} />
+            <span>{wakeLockEnabled ? 'Screen Awake: ON' : 'Keep Screen Awake'}</span>
           </button>
         )}
       </div>

@@ -94,15 +94,15 @@ export class BinanceService {
         } catch (spotErr) {
           this.liveExchange = null;
           let errMsg = err.message || 'Authentication failed';
-          
+
           if (errMsg.includes('-2008') || errMsg.includes('Invalid Api-Key ID')) {
             errMsg = 'Invalid Binance API Key. Please double-check that you copied the complete API Key correctly without missing characters.';
           } else if (errMsg.includes('-2015') || errMsg.includes('Invalid API-key') || errMsg.includes('AuthenticationError')) {
-            errMsg = 'Invalid Binance API Key, Secret, or IP restriction. Your router public IP may have changed — check Settings -> Current IP and add it to trusted IPs on Binance with "Enable Futures" checked.';
+            errMsg = 'Invalid Binance API Key or Secret. If you want to trade Futures, you must add your IP (112.134.246.225) to trusted IPs on Binance and tick "Enable Futures".';
           } else if (errMsg.includes('-1021') || errMsg.includes('Timestamp')) {
             errMsg = 'System clock out of sync. Please synchronize your computer time in Windows Settings.';
           } else if (errMsg.includes('IP') || errMsg.includes('restricted')) {
-            errMsg = 'Binance IP Access Restriction. Please add your current public IP in Settings to trusted IPs in Binance API Management.';
+            errMsg = 'Binance IP Access Restriction. Please add your IP (112.134.246.225) to trusted IPs in Binance API Management.';
           }
 
           return {
@@ -161,7 +161,7 @@ export class BinanceService {
       if (fs.existsSync(CREDENTIALS_FILE)) {
         fs.unlinkSync(CREDENTIALS_FILE);
       }
-    } catch (_) {}
+    } catch (_) { }
     return { success: true, message: 'Reverted to Paper Trading' };
   }
 
@@ -312,7 +312,7 @@ export class BinanceService {
   /**
    * Execute real market order on Binance USD-M Futures
    */
-  async executeLiveOrder({ symbol, side, amountUsdt, leverage = 10 }) {
+  async executeLiveOrder({ symbol, side, amountUsdt, leverage = 10, tp = null, sl = null }) {
     if (!this.liveExchange) {
       throw new Error('Binance API keys not configured. Please set them in Settings.');
     }
@@ -320,10 +320,10 @@ export class BinanceService {
       throw new Error('Futures trading permission is missing! Please select "Restrict access to trusted IPs only" on Binance, add IP 112.134.246.225, and check "Enable Futures".');
     }
     const cleanSym = symbol.replace('/', '').toUpperCase();
-    const pairInfo = CONFIG.DEFAULT_PAIRS.find(p => p.symbol === cleanSym) || { stepDecimals: 2, minQty: 0.01, minNotional: 5.5 };
+    const pairInfo = CONFIG.DEFAULT_PAIRS.find(p => p.symbol === cleanSym) || { precision: 2, stepDecimals: 2, minQty: 0.01, minNotional: 5.5 };
     const futuresSym = cleanSym === 'PEPEUSDT' ? '1000PEPEUSDT' : cleanSym;
     const marketSymbol = `${futuresSym.replace('USDT', '')}/USDT:USDT`;
-    
+
     try {
       await this.liveExchange.setLeverage(leverage, marketSymbol);
     } catch {
@@ -355,9 +355,66 @@ export class BinanceService {
       orderSide,
       fixedQty
     );
+
+    if (tp || sl) {
+      const scale = cleanSym === 'PEPEUSDT' ? 1000 : 1;
+      const pricePrec = cleanSym === 'PEPEUSDT' ? 7 : (pairInfo.precision || 2);
+      await this.placeProtectiveTpSlOrders({
+        futuresSym,
+        side,
+        tp: tp ? Number((Number(tp) * scale).toFixed(pricePrec)) : null,
+        sl: sl ? Number((Number(sl) * scale).toFixed(pricePrec)) : null
+      });
+    }
+
     this._cachedLiveBal = null;
     this._cachedLivePositions = null;
     return order;
+  }
+
+  /**
+   * Place Binance Futures native TAKE_PROFIT_MARKET & STOP_MARKET orders (24/7 exchange protection)
+   */
+  async placeProtectiveTpSlOrders({ futuresSym, side, tp = null, sl = null }) {
+    if (!this.liveExchange || !this.isFutures) return;
+    const closeSide = side === 'LONG' ? 'SELL' : 'BUY';
+
+    if (tp) {
+      try {
+        await this.liveExchange.fapiPrivatePostOrder({
+          symbol: futuresSym,
+          side: closeSide,
+          type: 'TAKE_PROFIT_MARKET',
+          stopPrice: String(tp),
+          closePosition: 'true',
+          workingType: 'MARK_PRICE'
+        });
+      } catch (e) {
+        console.warn(`[Binance Native TP note] ${futuresSym}:`, e.message);
+      }
+    }
+
+    if (sl) {
+      try {
+        await this.liveExchange.fapiPrivatePostOrder({
+          symbol: futuresSym,
+          side: closeSide,
+          type: 'STOP_MARKET',
+          stopPrice: String(sl),
+          closePosition: 'true',
+          workingType: 'MARK_PRICE'
+        });
+      } catch (e) {
+        console.warn(`[Binance Native SL note] ${futuresSym}:`, e.message);
+      }
+    }
+  }
+
+  async cancelSymbolOpenOrders(futuresSym) {
+    if (!this.liveExchange || !this.isFutures) return;
+    try {
+      await this.liveExchange.fapiPrivateDeleteAllOpenOrders({ symbol: futuresSym });
+    } catch {}
   }
 
   /**
@@ -379,6 +436,7 @@ export class BinanceService {
         undefined,
         { reduceOnly: true }
       );
+      await this.cancelSymbolOpenOrders(futuresSym);
       this._cachedLiveBal = null;
       this._cachedLivePositions = null;
       return order;
@@ -511,7 +569,7 @@ export class BinanceService {
     const basePrice = this.prices[symbol] || 65000;
     const candles = [];
     const now = Math.floor(Date.now() / 1000);
-    
+
     const intervalMap = {
       '1m': 60,
       '5m': 300,
@@ -671,7 +729,7 @@ export class BinanceService {
 
         this.ws.on('error', (err) => {
           console.warn('[Binance WebSocket] Error:', err.message);
-          try { this.ws.close(); } catch {}
+          try { this.ws.close(); } catch { }
         });
       } catch (err) {
         console.warn('[Binance WebSocket] Init failed, starting fallback price simulator:', err.message);

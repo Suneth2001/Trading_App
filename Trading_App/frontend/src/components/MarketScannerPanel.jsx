@@ -3,12 +3,15 @@ import {
   Radar, Bot, TrendingUp, TrendingDown, Play, Square, Sliders,
   ArrowUpRight, ArrowDownRight, Zap, Target, Shield, Check, Flame,
   BarChart2, Info, Activity, AlertTriangle, ChevronRight, Eye,
-  Sparkles, Filter, RefreshCw, X
+  Sparkles, Filter, RefreshCw, X, Cloud, Smartphone, Sun
 } from 'lucide-react';
 
 export function MarketScannerPanel({
   marketAnalysis,
   autopilotStatus,
+  cloudEngine = { online: false },
+  wakeLockEnabled = false,
+  onToggleWakeLock,
   onStartAutoPilot,
   onStopAutoPilot,
   onUpdateAutoPilotConfig,
@@ -218,6 +221,51 @@ export function MarketScannerPanel({
             </button>
           )}
         </div>
+      </div>
+
+      {/* ================= 24/7 BACKGROUND EXECUTION STATUS ================= */}
+      <div style={{
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        flexWrap: 'wrap',
+        gap: '8px',
+        padding: '9px 12px',
+        borderRadius: 'var(--radius-sm)',
+        background: cloudEngine?.online ? 'rgba(0, 245, 160, 0.07)' : 'rgba(245, 158, 11, 0.08)',
+        border: `1px solid ${cloudEngine?.online ? 'rgba(0, 245, 160, 0.28)' : 'rgba(245, 158, 11, 0.28)'}`,
+        fontSize: '11px'
+      }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '7px', color: cloudEngine?.online ? '#00F5A0' : '#FBBF24', fontWeight: 700 }}>
+          {cloudEngine?.online ? <Cloud size={14} /> : <Smartphone size={14} />}
+          <span>
+            {cloudEngine?.online
+              ? '☁️ 24/7 Background Engine ONLINE — Safe to close phone app (Auto-Pilot + Native TP/SL keep running 24/7)'
+              : '📱 Phone Standalone Mode — Native Binance TP/SL active; keep screen awake or run PC 24/7 Engine for background entries'}
+          </span>
+        </div>
+        {!cloudEngine?.online && onToggleWakeLock && (
+          <button
+            type="button"
+            onClick={onToggleWakeLock}
+            style={{
+              background: wakeLockEnabled ? 'rgba(0, 245, 160, 0.16)' : 'rgba(255,255,255,0.06)',
+              border: `1px solid ${wakeLockEnabled ? '#00F5A0' : 'var(--border)'}`,
+              color: wakeLockEnabled ? '#00F5A0' : '#E2E8F0',
+              borderRadius: '5px',
+              padding: '4px 9px',
+              fontSize: '10.5px',
+              fontWeight: 700,
+              cursor: 'pointer',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '4px'
+            }}
+          >
+            <Sun size={12} />
+            <span>{wakeLockEnabled ? 'Screen Awake: ON' : 'Keep Screen Awake'}</span>
+          </button>
+        )}
       </div>
 
       {/* ================= 2. LIVE TELEMETRY BAR ================= */}

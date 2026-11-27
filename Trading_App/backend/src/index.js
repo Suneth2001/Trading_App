@@ -16,6 +16,7 @@ import { BacktestEngine } from './services/backtestEngine.js';
 import { aiPredictor } from './services/aiPredictorService.js';
 import { IndicatorService } from './services/indicatorService.js';
 import { MarketAnalysisService } from './services/marketAnalysisService.js';
+import { MqttRelayClient } from './services/mqttRelay.js';
 
 const app = express();
 const server = http.createServer(app);
@@ -97,14 +98,36 @@ setInterval(async () => {
 
 // ======================== REST API ROUTES ======================== //
 
-// Health Check
+// Health Check & Lightweight 24/7 Keep-Alive Ping
 app.get('/api/health', (req, res) => {
   res.json({
     status: 'ONLINE',
     serverTime: new Date().toISOString(),
     uptime: process.uptime(),
     botRunning: strategyEngine.isRunning,
+    autopilotRunning: marketAnalysis.isAutoPilotRunning,
     openPositionsCount: paperTrading.positions.length
+  });
+});
+
+app.get('/api/ping', (req, res) => {
+  res.json({
+    ok: true,
+    botRunning: strategyEngine.isRunning,
+    autopilotRunning: marketAnalysis.isAutoPilotRunning,
+    isLive: Boolean(paperTrading.isLive && binanceService.liveExchange),
+    uptime: process.uptime()
+  });
+});
+
+app.get('/api/cloud-engine/status', (req, res) => {
+  res.json({
+    online: true,
+    mode: 'LOCAL_24X7_SERVER',
+    isLive: Boolean(paperTrading.isLive && binanceService.liveExchange),
+    botRunning: strategyEngine.isRunning,
+    autopilotRunning: marketAnalysis.isAutoPilotRunning,
+    lastSeenAt: new Date().toISOString()
   });
 });
 
@@ -161,8 +184,6 @@ app.post('/api/account/reset', (req, res) => {
   const result = paperTrading.resetAccount(balance || CONFIG.PAPER_TRADING_DEFAULT_BALANCE);
   io.emit('account_summary', result);
   io.emit('positions_update', []);
-  saveRuntimeState();
-  pushCloudSync();
   res.json({ success: true, summary: result });
 });
 
@@ -199,7 +220,7 @@ app.post('/api/account/api-keys', async (req, res) => {
   try {
     const { apiKey, apiSecret, useTestnet } = req.body;
     const result = await binanceService.setApiCredentials({ apiKey, apiSecret, useTestnet });
-    
+
     if (result.success && binanceService.liveExchange) {
       paperTrading.setLiveMode(true);
       const liveBal = await binanceService.getLiveBalance();
@@ -220,7 +241,7 @@ app.post('/api/account/api-keys', async (req, res) => {
       pushCloudSync();
       return res.json({ ...result, isLive: false, summary: demoBal, positions: paperTrading.positions });
     }
-    
+
     return res.status(400).json(result);
   } catch (err) {
     return res.status(500).json({ success: false, error: err.message || 'Server error setting API credentials' });
@@ -274,7 +295,9 @@ app.post('/api/order/open', async (req, res) => {
           symbol,
           side,
           amountUsdt: effAmount,
-          leverage: effLeverage
+          leverage: effLeverage,
+          tp,
+          sl
         });
       } catch (liveErr) {
         return res.status(400).json({ error: `Binance Live Order Error: ${liveErr.message}` });
@@ -394,8 +417,6 @@ app.post('/api/order/close-all', async (req, res) => {
     }
     const closed = paperTrading.closeAllPositions(binanceService.getCurrentPrices(), 'PANIC_CLOSE_ALL');
     await broadcastAccountState();
-    saveRuntimeState();
-    pushCloudSync();
     res.json({ success: true, count: closed.length, closed });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -575,17 +596,15 @@ const saveRuntimeState = () => {
       guardianSettings: marginGuardian.getSettings(),
       positionTargets: marginGuardian.positionTargets,
       botStatus: strategyEngine.getStatus(),
-      autopilotStatus: marketAnalysis.getAutoPilotStatus(),
-      lastAppliedSyncTime
+      autopilotStatus: marketAnalysis.getAutoPilotStatus()
     }, null, 2));
-  } catch {}
+  } catch { }
 };
 
 const loadRuntimeState = () => {
   try {
     if (!fs.existsSync(RUNTIME_STATE_FILE)) return;
     const saved = JSON.parse(fs.readFileSync(RUNTIME_STATE_FILE, 'utf8'));
-    if (saved.lastAppliedSyncTime) lastAppliedSyncTime = Number(saved.lastAppliedSyncTime);
     if (saved.balance !== undefined) paperTrading.balance = saved.balance;
     if (saved.initialBalance !== undefined) paperTrading.initialBalance = saved.initialBalance;
     if (Array.isArray(saved.positions)) paperTrading.positions = saved.positions;
@@ -600,20 +619,58 @@ const loadRuntimeState = () => {
       if (saved.autopilotStatus.config) marketAnalysis.updateAutoPilotConfig(saved.autopilotStatus.config);
       if (saved.autopilotStatus.isAutoPilotRunning) marketAnalysis.startAutoPilot();
     }
-  } catch {}
+  } catch { }
 };
 
 setInterval(saveRuntimeState, 3000);
 
-// ================= CROSS-DEVICE REAL-TIME CLOUD SYNC (LAPTOP <-> MOBILE) ================= //
+// ================= CROSS-DEVICE REAL-TIME MQTT CLOUD SYNC (LAPTOP <-> MOBILE) ================= //
 const SYNC_DEVICE_ID = 'PC-' + Math.random().toString(36).slice(2, 10);
-const SYNC_TOPIC = 'apexalgo_cloud_sync_suneth2001_v4';
+const SYNC_STATE_TOPIC = 'apexalgo/suneth2001/v5/state';
+const SYNC_HEARTBEAT_TOPIC = 'apexalgo/suneth2001/v5/heartbeat';
 let lastAppliedSyncTime = 0;
 let lastLocalControlTime = 0;
 let isApplyingRemoteSync = false;
 
 strategyEngine.onTradeCallback = () => pushCloudSync();
 marketAnalysis.onTradeCallback = () => pushCloudSync();
+
+const mqttRelay = new MqttRelayClient({
+  clientId: SYNC_DEVICE_ID,
+  topics: [SYNC_STATE_TOPIC],
+  onMessage: (topic, payload) => {
+    try {
+      const snap = JSON.parse(payload);
+      if (topic === SYNC_STATE_TOPIC) {
+        applyRemoteSnapshot(snap);
+      }
+    } catch {}
+  }
+});
+
+async function broadcastEngineHeartbeat() {
+  try {
+    const isLive = Boolean(paperTrading.isLive && binanceService.liveExchange);
+    let equity = paperTrading.getBalance().equity;
+    if (isLive) {
+      const liveBal = await binanceService.getLiveBalance();
+      if (liveBal?.equity !== undefined) equity = liveBal.equity;
+    }
+    mqttRelay.publish(
+      SYNC_HEARTBEAT_TOPIC,
+      {
+        type: 'ENGINE_HEARTBEAT',
+        deviceId: SYNC_DEVICE_ID,
+        updatedAt: Date.now(),
+        isLive,
+        botRunning: strategyEngine.isRunning,
+        autopilotRunning: marketAnalysis.isAutoPilotRunning,
+        equity
+      },
+      true
+    );
+  } catch {}
+}
 
 async function pushCloudSync() {
   if (isApplyingRemoteSync) return;
@@ -622,26 +679,37 @@ async function pushCloudSync() {
   saveRuntimeState();
 
   let liveSummary = null;
-  let livePositions = [];
   if (paperTrading.isLive && binanceService.liveExchange) {
     try {
       liveSummary = await binanceService.getLiveBalance();
-      livePositions = await binanceService.getLivePositions();
     } catch {}
   }
 
   const botSt = strategyEngine.getStatus();
   const gSt = marginGuardian.getSettings();
+  const compactPositions = (paperTrading.positions || []).slice(0, 6).map(p => ({
+    id: p.id,
+    symbol: p.symbol,
+    side: p.side,
+    size: p.size,
+    entryPrice: p.entryPrice,
+    leverage: p.leverage,
+    margin: p.margin,
+    tp: p.tp,
+    sl: p.sl,
+    source: p.source,
+    openedAt: p.openedAt
+  }));
+
   const snapshot = {
+    type: 'STATE_SYNC',
     deviceId: SYNC_DEVICE_ID,
     updatedAt: now,
     isLive: paperTrading.isLive,
-    balance: paperTrading.balance,
-    initialBalance: paperTrading.initialBalance,
+    balance: Number(paperTrading.balance || 0),
+    initialBalance: Number(paperTrading.initialBalance || 10000),
     liveSummary,
-    livePositions: (livePositions || []).slice(0, 15),
-    positions: (paperTrading.positions || []).slice(0, 15),
-    orderHistory: (paperTrading.orderHistory || []).slice(0, 10),
+    positions: compactPositions,
     botStatus: {
       isRunning: botSt.isRunning,
       activeStrategyId: botSt.activeStrategyId,
@@ -652,9 +720,7 @@ async function pushCloudSync() {
       stopLossPct: botSt.stopLossPct,
       takeProfitPct: botSt.takeProfitPct,
       trailingStopPct: botSt.trailingStopPct,
-      timeframe: botSt.timeframe,
-      lastScanSummary: botSt.lastScanSummary,
-      recentLogs: (botSt.recentLogs || []).slice(0, 10)
+      timeframe: botSt.timeframe
     },
     autopilotStatus: marketAnalysis.getAutoPilotStatus(),
     guardianSettings: {
@@ -669,16 +735,12 @@ async function pushCloudSync() {
     lastAutoTradeTime: marketAnalysis.lastAutoTradeTime || 0
   };
 
-  try {
-    await fetch(`https://ntfy.sh/${SYNC_TOPIC}`, {
-      method: 'POST',
-      body: JSON.stringify(snapshot)
-    });
-  } catch {}
+  mqttRelay.publish(SYNC_STATE_TOPIC, snapshot, true);
 }
 
 function applyRemoteSnapshot(snap) {
   if (!snap || typeof snap !== 'object') return;
+  if (snap.type === 'ENGINE_HEARTBEAT') return;
   if (snap.deviceId === SYNC_DEVICE_ID) return;
   if (!snap.updatedAt || snap.updatedAt <= lastAppliedSyncTime) return;
   if (snap.updatedAt <= lastLocalControlTime + 2500) return;
@@ -691,20 +753,27 @@ function applyRemoteSnapshot(snap) {
     }
     if (snap.balance !== undefined) paperTrading.balance = Number(snap.balance);
     if (snap.initialBalance !== undefined) paperTrading.initialBalance = Number(snap.initialBalance);
-    if (Array.isArray(snap.positions)) paperTrading.positions = snap.positions;
-    if (Array.isArray(snap.orderHistory) && snap.orderHistory.length > 0) {
-      paperTrading.orderHistory = snap.orderHistory;
+    if (Array.isArray(snap.positions) && !paperTrading.isLive) {
+      paperTrading.positions = snap.positions;
     }
     if (snap.botStatus) {
+      const prevBotRun = strategyEngine.isRunning;
       strategyEngine.updateConfig(snap.botStatus);
       if (snap.botStatus.isRunning && !strategyEngine.isRunning) strategyEngine.start();
-      else if (!snap.botStatus.isRunning && strategyEngine.isRunning) strategyEngine.stop();
+      else if (snap.botStatus.isRunning === false && strategyEngine.isRunning) strategyEngine.stop();
+      if (prevBotRun !== strategyEngine.isRunning) {
+        console.log(`[Cloud Sync] Remote command from ${snap.deviceId}: Auto-Bot=${strategyEngine.isRunning ? 'ON' : 'OFF'}`);
+      }
       io.emit('bot_status', strategyEngine.getStatus());
     }
     if (snap.autopilotStatus) {
+      const prevApRun = marketAnalysis.isAutoPilotRunning;
       if (snap.autopilotStatus.config) marketAnalysis.updateAutoPilotConfig(snap.autopilotStatus.config);
       if (snap.autopilotStatus.isAutoPilotRunning && !marketAnalysis.isAutoPilotRunning) marketAnalysis.startAutoPilot();
-      else if (!snap.autopilotStatus.isAutoPilotRunning && marketAnalysis.isAutoPilotRunning) marketAnalysis.stopAutoPilot();
+      else if (snap.autopilotStatus.isAutoPilotRunning === false && marketAnalysis.isAutoPilotRunning) marketAnalysis.stopAutoPilot();
+      if (prevApRun !== marketAnalysis.isAutoPilotRunning) {
+        console.log(`[Cloud Sync] Remote command from ${snap.deviceId}: Auto-Pilot=${marketAnalysis.isAutoPilotRunning ? 'ON' : 'OFF'}`);
+      }
       io.emit('autopilot_status', marketAnalysis.getAutoPilotStatus());
     }
     if (snap.guardianSettings) {
@@ -720,45 +789,6 @@ function applyRemoteSnapshot(snap) {
   } finally {
     isApplyingRemoteSync = false;
   }
-}
-
-async function pollCloudSync() {
-  try {
-    const res = await fetch(`https://ntfy.sh/${SYNC_TOPIC}/json?poll=1&since=12h`);
-    const text = await res.text();
-    if (!text) return;
-    const lines = text.trim().split('\n');
-    let latestSnap = null;
-    for (const line of lines) {
-      try {
-        const obj = JSON.parse(line);
-        if (obj.event === 'message' && obj.message) {
-          const parsed = JSON.parse(obj.message);
-          if (parsed && parsed.updatedAt && (!latestSnap || parsed.updatedAt > latestSnap.updatedAt)) {
-            latestSnap = parsed;
-          }
-        }
-      } catch {}
-    }
-    if (latestSnap) applyRemoteSnapshot(latestSnap);
-  } catch {}
-}
-
-function connectCloudSyncWs() {
-  try {
-    const ws = new WebSocket(`wss://ntfy.sh/${SYNC_TOPIC}/ws`);
-    ws.on('message', (data) => {
-      try {
-        const obj = JSON.parse(data.toString());
-        if (obj.event === 'message' && obj.message) {
-          const snap = JSON.parse(obj.message);
-          applyRemoteSnapshot(snap);
-        }
-      } catch {}
-    });
-    ws.on('close', () => setTimeout(connectCloudSyncWs, 4000));
-    ws.on('error', () => { try { ws.close(); } catch {} });
-  } catch {}
 }
 
 // Generate & serve Apple iOS WebClip Configuration Profile (.mobileconfig) for 1-Tap iPhone Installation
@@ -818,32 +848,31 @@ app.get('/ApexAlgo-iPhone.mobileconfig', (req, res) => {
   res.send(mobileConfigXml);
 });
 
-// Initialize Live credentials + persisted runtime state BEFORE accepting HTTP/Socket requests
-async function bootstrapServer() {
-  try {
-    const credsResult = await binanceService.loadSavedCredentials();
-    if (credsResult && credsResult.success && binanceService.liveExchange) {
-      paperTrading.setLiveMode(true);
-      console.log(`[Binance] Live Trading Mode restored on boot! (${credsResult.message})`);
+// Start Server on 0.0.0.0 so both localhost and Mobile LAN devices can connect
+server.listen(CONFIG.PORT, '0.0.0.0', () => {
+  console.log(`================================================================`);
+  console.log(`  CRYPTO AUTO-TRADING ENGINE BACKEND RUNNING ON PORT ${CONFIG.PORT} `);
+  console.log(`  TRADINGVIEW WEBHOOK URL: http://localhost:${CONFIG.PORT}${CONFIG.TRADINGVIEW.WEBHOOK_PATH}`);
+  console.log(`  MARGIN GUARDIAN: ACTIVE (Auto-Close at ${CONFIG.MARGIN_GUARDIAN.DEFAULT_CRITICAL_MARGIN_RATIO}% Margin)`);
+  console.log(`================================================================`);
+
+  // Auto-restore saved live Binance credentials BEFORE loading persisted bot/autopilot state
+  (async () => {
+    try {
+      const credsResult = await binanceService.loadSavedCredentials();
+      if (credsResult && credsResult.success && binanceService.liveExchange) {
+        paperTrading.setLiveMode(true);
+        console.log(`[Binance] Live Trading Mode restored on boot! (${credsResult.message})`);
+        await broadcastAccountState();
+      }
+    } catch (err) {
+      console.warn('[Binance] Startup credentials load failed:', err.message);
     }
-  } catch (err) {
-    console.warn('[Binance] Startup credentials load failed:', err.message);
-  }
 
-  loadRuntimeState();
-
-  server.listen(CONFIG.PORT, '0.0.0.0', () => {
-    console.log(`================================================================`);
-    console.log(`  CRYPTO AUTO-TRADING ENGINE BACKEND RUNNING ON PORT ${CONFIG.PORT} `);
-    console.log(`  TRADINGVIEW WEBHOOK URL: http://localhost:${CONFIG.PORT}${CONFIG.TRADINGVIEW.WEBHOOK_PATH}`);
-    console.log(`  MARGIN GUARDIAN: ACTIVE (Auto-Close at ${CONFIG.MARGIN_GUARDIAN.DEFAULT_CRITICAL_MARGIN_RATIO}% Margin)`);
-    console.log(`================================================================`);
-
-    broadcastAccountState();
-    pollCloudSync();
-    connectCloudSyncWs();
-    setInterval(pollCloudSync, 6000);
-  });
-}
-
-bootstrapServer();
+    // Restore saved bot/autopilot/guardian state only after Live credentials are initialized
+    loadRuntimeState();
+    mqttRelay.connect();
+    broadcastEngineHeartbeat();
+    setInterval(broadcastEngineHeartbeat, 25000);
+  })();
+});

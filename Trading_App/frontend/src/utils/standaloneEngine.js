@@ -8,6 +8,8 @@
  * - Paper Trading Wallet (balance, open positions & trade history)
  */
 
+import { MqttRelayClient } from './mqttRelay.js';
+
 export const DEFAULT_PAIRS = [
   { symbol: 'BTCUSDT', name: 'Bitcoin', base: 'BTC', quote: 'USDT', precision: 2, minQty: 0.001, stepDecimals: 3, minNotional: 50 },
   { symbol: 'ETHUSDT', name: 'Ethereum', base: 'ETH', quote: 'USDT', precision: 2, minQty: 0.001, stepDecimals: 3, minNotional: 20 },
@@ -653,14 +655,61 @@ class StandaloneTradingEngine {
     this.isBotEvaluating = false;
     this.isAutoPilotEvaluating = false;
 
-    // Cross-Device Real-Time Cloud Sync (Laptop <-> Mobile iPhone/Android)
+    // Cross-Device Real-Time MQTT Cloud Sync & 24/7 Background Engine Status
     this.deviceId = 'MOB-' + Math.random().toString(36).slice(2, 10);
-    this.syncTopic = 'apexalgo_cloud_sync_suneth2001_v4';
+    this.syncStateTopic = 'apexalgo/suneth2001/v5/state';
+    this.syncHeartbeatTopic = 'apexalgo/suneth2001/v5/heartbeat';
     this.lastAppliedSyncTime = savedState.lastAppliedSyncTime || 0;
     this.lastLocalControlTime = 0;
-    this.syncWs = null;
     this.isApplyingRemoteSync = false;
     this.externalBackendActive = false;
+    this.cloudEngineLastSeen = 0;
+    this.cloudEngineInfo = {
+      online: false,
+      isLive: false,
+      botRunning: false,
+      autopilotRunning: false,
+      lastSeenAt: null
+    };
+    this.bgWorker = null;
+    this.mqttRelay = new MqttRelayClient({
+      clientId: this.deviceId,
+      topics: [this.syncStateTopic, this.syncHeartbeatTopic],
+      onMessage: (topic, payload) => {
+        try {
+          const snap = JSON.parse(payload);
+          if (topic === this.syncHeartbeatTopic || snap?.type === 'ENGINE_HEARTBEAT') {
+            this._handleHeartbeat(snap);
+          } else if (topic === this.syncStateTopic) {
+            this._applyRemoteSnapshot(snap);
+          }
+        } catch {}
+      }
+    });
+  }
+
+  _handleHeartbeat(hb) {
+    if (!hb || typeof hb !== 'object') return;
+    if (hb.deviceId === this.deviceId) return;
+    this.cloudEngineLastSeen = Date.now();
+    this.cloudEngineInfo = {
+      online: true,
+      isLive: Boolean(hb.isLive),
+      botRunning: Boolean(hb.botRunning),
+      autopilotRunning: Boolean(hb.autopilotRunning),
+      equity: hb.equity,
+      lastSeenAt: new Date().toISOString()
+    };
+    this.emit('cloud_engine_status', { ...this.cloudEngineInfo });
+  }
+
+  isCloudEngineOnline() {
+    const isOnline = this.externalBackendActive || (this.cloudEngineLastSeen > 0 && (Date.now() - this.cloudEngineLastSeen) < 75000);
+    if (this.cloudEngineInfo.online !== isOnline) {
+      this.cloudEngineInfo = { ...this.cloudEngineInfo, online: isOnline };
+      this.emit('cloud_engine_status', { ...this.cloudEngineInfo });
+    }
+    return isOnline;
   }
 
   setExternalBackendActive(active) {
@@ -668,13 +717,9 @@ class StandaloneTradingEngine {
     if (this.externalBackendActive === next) return;
     this.externalBackendActive = next;
     if (next) {
-      if (this.syncWs) {
-        try { this.syncWs.close(); } catch {}
-        this.syncWs = null;
-      }
+      this.mqttRelay.close();
     } else if (this.started) {
-      this._connectCloudSyncWs();
-      this._pollCloudSync();
+      this.mqttRelay.ensureConnected();
     }
   }
 
@@ -714,7 +759,7 @@ class StandaloneTradingEngine {
   }
 
   
-  // ================= CROSS-DEVICE REAL-TIME CLOUD SYNC (LAPTOP <-> MOBILE) ================= //
+  // ================= CROSS-DEVICE REAL-TIME MQTT CLOUD SYNC (LAPTOP <-> MOBILE) ================= //
 
   _pushCloudSync() {
     if (this.isApplyingRemoteSync || this.externalBackendActive) return;
@@ -722,16 +767,29 @@ class StandaloneTradingEngine {
     this.lastAppliedSyncTime = now;
     this._saveState();
 
+    const compactPositions = (this.positions || []).slice(0, 6).map(p => ({
+      id: p.id,
+      symbol: p.symbol,
+      side: p.side,
+      size: p.size,
+      entryPrice: p.entryPrice,
+      leverage: p.leverage,
+      margin: p.margin,
+      tp: p.tp,
+      sl: p.sl,
+      source: p.source,
+      openedAt: p.openedAt
+    }));
+
     const snapshot = {
+      type: 'STATE_SYNC',
       deviceId: this.deviceId,
       updatedAt: now,
       isLive: this.isLive,
-      balance: this.balance,
-      initialBalance: this.initialBalance,
+      balance: Number(this.balance || 0),
+      initialBalance: Number(this.initialBalance || 10000),
       liveSummary: this.liveSummary,
-      livePositions: (this.livePositions || []).slice(0, 15),
-      positions: (this.positions || []).slice(0, 15),
-      orderHistory: (this.orderHistory || []).slice(0, 10),
+      positions: compactPositions,
       botStatus: {
         isRunning: this.botStatus.isRunning,
         activeStrategyId: this.botStatus.activeStrategyId,
@@ -742,9 +800,7 @@ class StandaloneTradingEngine {
         stopLossPct: this.botStatus.stopLossPct,
         takeProfitPct: this.botStatus.takeProfitPct,
         trailingStopPct: this.botStatus.trailingStopPct,
-        timeframe: this.botStatus.timeframe,
-        lastScanSummary: this.botStatus.lastScanSummary,
-        recentLogs: (this.botStatus.recentLogs || []).slice(0, 10)
+        timeframe: this.botStatus.timeframe
       },
       autopilotStatus: this.autopilotStatus,
       guardianSettings: {
@@ -759,19 +815,20 @@ class StandaloneTradingEngine {
       lastAutoTradeTime: this.lastAutoTradeTime
     };
 
-    try {
-      const f = window._nativeFetch || window.fetch.bind(window);
-      f(`https://ntfy.sh/${this.syncTopic}`, {
-        method: 'POST',
-        body: JSON.stringify(snapshot)
-      }).catch(() => {});
-    } catch {}
+    this.mqttRelay.ensureConnected();
+    this.mqttRelay.publish(this.syncStateTopic, snapshot, true);
   }
 
   _applyRemoteSnapshot(snap) {
-    if (this.externalBackendActive) return;
     if (!snap || typeof snap !== 'object') return;
     if (snap.deviceId === this.deviceId) return;
+
+    if (snap.type === 'ENGINE_HEARTBEAT' || String(snap.deviceId || '').startsWith('PC-')) {
+      this._handleHeartbeat(snap);
+      if (snap.type === 'ENGINE_HEARTBEAT') return;
+    }
+
+    if (this.externalBackendActive) return;
     if (!snap.updatedAt || snap.updatedAt <= this.lastAppliedSyncTime) return;
     if (snap.updatedAt <= this.lastLocalControlTime + 2500) return;
 
@@ -783,7 +840,7 @@ class StandaloneTradingEngine {
       if (snap.initialBalance !== undefined) this.initialBalance = Number(snap.initialBalance);
       if (snap.liveSummary) this.liveSummary = snap.liveSummary;
       if (Array.isArray(snap.livePositions)) this.livePositions = snap.livePositions;
-      if (Array.isArray(snap.positions)) this.positions = snap.positions;
+      if (Array.isArray(snap.positions) && !this.isLive) this.positions = snap.positions;
       if (Array.isArray(snap.orderHistory) && snap.orderHistory.length > 0) {
         this.orderHistory = snap.orderHistory;
       }
@@ -808,53 +865,6 @@ class StandaloneTradingEngine {
     } finally {
       this.isApplyingRemoteSync = false;
     }
-  }
-
-  async _pollCloudSync() {
-    if (this.externalBackendActive) return;
-    try {
-      const f = window._nativeFetch || window.fetch.bind(window);
-      const res = await f(`https://ntfy.sh/${this.syncTopic}/json?poll=1&since=12h`);
-      const text = await res.text();
-      if (!text) return;
-      const lines = text.trim().split('\n');
-      let latestSnap = null;
-      for (const line of lines) {
-        try {
-          const obj = JSON.parse(line);
-          if (obj.event === 'message' && obj.message) {
-            const parsed = JSON.parse(obj.message);
-            if (parsed && parsed.updatedAt && (!latestSnap || parsed.updatedAt > latestSnap.updatedAt)) {
-              latestSnap = parsed;
-            }
-          }
-        } catch {}
-      }
-      if (latestSnap) {
-        this._applyRemoteSnapshot(latestSnap);
-      }
-    } catch {}
-  }
-
-  _connectCloudSyncWs() {
-    if (this.externalBackendActive) return;
-    try {
-      if (this.syncWs && (this.syncWs.readyState === 0 || this.syncWs.readyState === 1)) return;
-      const ws = new WebSocket(`wss://ntfy.sh/${this.syncTopic}/ws`);
-      this.syncWs = ws;
-      ws.onmessage = (event) => {
-        try {
-          const obj = JSON.parse(event.data);
-          if (obj.event === 'message' && obj.message) {
-            const snap = JSON.parse(obj.message);
-            this._applyRemoteSnapshot(snap);
-          }
-        } catch {}
-      };
-      ws.onclose = () => {
-        setTimeout(() => this._connectCloudSyncWs(), 4000);
-      };
-    } catch {}
   }
 
   on(event, fn) {
@@ -1044,6 +1054,33 @@ class StandaloneTradingEngine {
       quantity
     });
 
+    // Place non-fatal exchange-side protective TP/SL orders on Binance Futures
+    if (tp || sl) {
+      const closeSide = side === 'LONG' ? 'SELL' : 'BUY';
+      const scale = cleanSym === 'PEPEUSDT' ? 1000 : 1;
+      const pricePrec = cleanSym === 'PEPEUSDT' ? 7 : (pairInfo.precision || 2);
+      if (tp) {
+        this._signedFuturesRequest('POST', '/fapi/v1/order', {
+          symbol: futuresSym,
+          side: closeSide,
+          type: 'TAKE_PROFIT_MARKET',
+          stopPrice: String(Number((Number(tp) * scale).toFixed(pricePrec))),
+          closePosition: 'true',
+          workingType: 'MARK_PRICE'
+        }).catch(() => {});
+      }
+      if (sl) {
+        this._signedFuturesRequest('POST', '/fapi/v1/order', {
+          symbol: futuresSym,
+          side: closeSide,
+          type: 'STOP_MARKET',
+          stopPrice: String(Number((Number(sl) * scale).toFixed(pricePrec))),
+          closePosition: 'true',
+          workingType: 'MARK_PRICE'
+        }).catch(() => {});
+      }
+    }
+
     // Save TP / SL / Trailing Stop targets for this Live Binance position so Margin Guardian protects it 24/7
     const posId = `BINANCE-${cleanSym}-${side}`;
     this.livePositionTargets[posId] = {
@@ -1071,6 +1108,7 @@ class StandaloneTradingEngine {
       quantity: pos.size,
       reduceOnly: 'true'
     });
+    this._signedFuturesRequest('DELETE', '/fapi/v1/allOpenOrders', { symbol: futuresSym }).catch(() => {});
 
     const closedRecord = {
       id: pos.id,
@@ -1104,12 +1142,10 @@ class StandaloneTradingEngine {
     this._connectBinanceWs();
     this.fetchTickerStats();
 
-    // Start Real-Time Cloud Sync (Laptop <-> Mobile)
-    this._pollCloudSync();
-    this._connectCloudSyncWs();
-    setInterval(() => {
-      this._pollCloudSync();
-    }, 4000);
+    // Start Real-Time MQTT Cloud Sync (Laptop <-> Mobile)
+    if (!this.externalBackendActive) {
+      this.mqttRelay.connect();
+    }
 
     // Broadcast restored persisted states immediately on boot
     this.emit('account_summary', this.getAccountSummary());
@@ -1127,49 +1163,69 @@ class StandaloneTradingEngine {
       this.verifyAndLoadLiveAccount(savedKey, savedSecret).catch(() => {});
     }
 
-    // Resume on mobile app foreground / wake from background
-    if (typeof document !== 'undefined') {
-      document.addEventListener('visibilitychange', () => {
-        if (document.visibilityState === 'visible' && !this.externalBackendActive) {
-          if (!this.ws || this.ws.readyState !== 1) {
-            this._connectBinanceWs();
-          }
-          if (this.isLive && this.apiKey && this.apiSecret) {
-            this.verifyAndLoadLiveAccount(this.apiKey, this.apiSecret).catch(() => {});
-          }
-          this.runMarketScan();
-        }
-      });
-    }
-
-    // Guardian & Mark Price Update Loop (every 1.5s for both Demo and Live positions when standalone!)
-    setInterval(() => {
-      if (!this.externalBackendActive) {
-        this._updatePositionsAndGuardian();
-      }
-    }, 1500);
-
-    // Live Binance Account Sync Loop (every 3.5s when Live mode is active & standalone)
-    setInterval(() => {
-      if (!this.externalBackendActive && this.isLive && this.apiKey && this.apiSecret) {
+    // Instant Resume Catch-Up when Phone / Tab wakes up from background
+    const handleResume = () => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+      if (this.externalBackendActive) return;
+      if (!this.ws || this.ws.readyState !== 1) this._connectBinanceWs();
+      this.mqttRelay.ensureConnected();
+      if (this.isLive && this.apiKey && this.apiSecret) {
         this.verifyAndLoadLiveAccount(this.apiKey, this.apiSecret).catch(() => {});
       }
-    }, 3500);
-
-    // Market Scanner & AI Auto-Pilot Loop (every 6s when standalone)
-    setTimeout(() => {
-      if (!this.externalBackendActive) this.runMarketScan();
-    }, 600);
-    setInterval(() => {
-      if (!this.externalBackendActive) this.runMarketScan();
-    }, 6000);
-
-    // Auto Bot Loop (every 3.5s when standalone)
-    setInterval(() => {
-      if (!this.externalBackendActive && this.botStatus.isRunning) {
-        this._evaluateBotCycle();
+      this._updatePositionsAndGuardian();
+      if (!this.isCloudEngineOnline()) {
+        this.runMarketScan();
+        if (this.botStatus.isRunning) this._evaluateBotCycle();
       }
-    }, 3500);
+    };
+    if (typeof document !== 'undefined') {
+      document.addEventListener('visibilitychange', handleResume);
+    }
+    if (typeof window !== 'undefined') {
+      window.addEventListener('focus', handleResume);
+      window.addEventListener('pageshow', handleResume);
+    }
+
+    // Unthrottled Web Worker Heartbeat (keeps background Chrome / Android WebView running smoothly)
+    this._startWorkerHeartbeat();
+    setTimeout(() => {
+      if (!this.externalBackendActive && !this.isCloudEngineOnline()) this.runMarketScan();
+    }, 600);
+  }
+
+  _startWorkerHeartbeat() {
+    let tickCount = 0;
+    const onTick = () => {
+      if (this.externalBackendActive) return;
+      tickCount++;
+      const cloudOnline = this.isCloudEngineOnline();
+
+      // Always keep Profit-Lock Guardian & live Binance equity synced unless PC Cloud handles it
+      if (!cloudOnline) {
+        this._updatePositionsAndGuardian();
+      }
+      if (tickCount % 3 === 0 && this.isLive && this.apiKey && this.apiSecret) {
+        this.verifyAndLoadLiveAccount(this.apiKey, this.apiSecret).catch(() => {});
+      }
+      if (!cloudOnline) {
+        if (tickCount % 3 === 0 && this.botStatus.isRunning) {
+          this._evaluateBotCycle();
+        }
+        if (tickCount % 4 === 0) {
+          this.runMarketScan();
+        }
+      }
+    };
+
+    try {
+      if (typeof Worker !== 'undefined' && typeof Blob !== 'undefined') {
+        const blob = new Blob(['setInterval(() => postMessage(1), 1500);'], { type: 'application/javascript' });
+        this.bgWorker = new Worker(URL.createObjectURL(blob));
+        this.bgWorker.onmessage = onTick;
+        return;
+      }
+    } catch {}
+    setInterval(onTick, 1500);
   }
 
   _connectBinanceWs() {
@@ -1835,7 +1891,7 @@ class StandaloneTradingEngine {
   }
 
   async _evaluateAutoPilot(rankedCoins) {
-    if (this.isAutoPilotEvaluating || this.externalBackendActive) return;
+    if (this.isAutoPilotEvaluating || this.externalBackendActive || this.isCloudEngineOnline()) return;
     this.isAutoPilotEvaluating = true;
 
     try {
@@ -2108,7 +2164,7 @@ class StandaloneTradingEngine {
   }
 
   async _evaluateBotCycle() {
-    if (!this.botStatus.isRunning || this.isBotEvaluating || this.externalBackendActive) return;
+    if (!this.botStatus.isRunning || this.isBotEvaluating || this.externalBackendActive || this.isCloudEngineOnline()) return;
     this.isBotEvaluating = true;
 
     try {
@@ -2345,6 +2401,17 @@ class StandaloneTradingEngine {
 
     if (path === '/api/health') {
       return { status: 'ONLINE', mode: 'STANDALONE_ENGINE', serverTime: new Date().toISOString() };
+    }
+    if (path === '/api/ping') {
+      return {
+        ok: true,
+        botRunning: this.botStatus.isRunning,
+        autopilotRunning: this.autopilotStatus.isAutoPilotRunning,
+        isLive: this.isLive
+      };
+    }
+    if (path === '/api/cloud-engine/status') {
+      return { ...this.cloudEngineInfo, online: this.isCloudEngineOnline() };
     }
     if (path === '/api/my-ip') {
       try {

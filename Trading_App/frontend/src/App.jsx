@@ -46,6 +46,9 @@ export function App() {
   const [notification, setNotification] = useState(null);
   const [pullDistance, setPullDistance] = useState(0);
   const [isPullRefreshing, setIsPullRefreshing] = useState(false);
+  const [cloudEngine, setCloudEngine] = useState({ online: false, mode: 'PHONE_STANDALONE' });
+  const [wakeLockEnabled, setWakeLockEnabled] = useState(false);
+  const wakeLockRef = useRef(null);
 
   const socketRef = useRef(null);
   const touchStartYRef = useRef(0);
@@ -134,14 +137,17 @@ export function App() {
     // Socket Event Listeners & Single-Master Backend Coordination
     socket.on('connect', () => {
       standaloneEngine.setExternalBackendActive(true);
+      setCloudEngine({ online: true, mode: 'PC_24X7_SERVER' });
     });
 
     socket.on('disconnect', () => {
       standaloneEngine.setExternalBackendActive(false);
+      setCloudEngine({ ...standaloneEngine.cloudEngineInfo, online: standaloneEngine.isCloudEngineOnline() });
     });
 
     socket.on('connect_error', () => {
       standaloneEngine.setExternalBackendActive(false);
+      setCloudEngine({ ...standaloneEngine.cloudEngineInfo, online: standaloneEngine.isCloudEngineOnline() });
     });
 
     socket.on('price_tick', ({ symbol, price, stats }) => {
@@ -296,6 +302,10 @@ export function App() {
             if (d.history) setHistory(d.history);
           });
       }),
+      standaloneEngine.on('cloud_engine_status', (info) => {
+        if (socketRef.current?.connected) return;
+        setCloudEngine(info || { online: false });
+      }),
       standaloneEngine.on('margin_guardian_alert', (alertData) => {
         if (socketRef.current?.connected) return;
         soundFX.playMarginAlert();
@@ -357,6 +367,38 @@ export function App() {
     setTimeout(() => {
       setNotification(prev => (prev?.message === message ? null : prev));
     }, 4500);
+  };
+
+  // Screen Wake Lock (keeps mobile browser awake when standalone without PC/Cloud server)
+  useEffect(() => {
+    const requestLock = async () => {
+      if (!wakeLockEnabled || !navigator?.wakeLock?.request) return;
+      try {
+        wakeLockRef.current = await navigator.wakeLock.request('screen');
+      } catch {}
+    };
+    const onVis = () => {
+      if (document.visibilityState === 'visible' && wakeLockEnabled) {
+        requestLock();
+      }
+    };
+    if (wakeLockEnabled) {
+      requestLock();
+      document.addEventListener('visibilitychange', onVis);
+    } else if (wakeLockRef.current) {
+      try { wakeLockRef.current.release(); } catch {}
+      wakeLockRef.current = null;
+    }
+    return () => {
+      document.removeEventListener('visibilitychange', onVis);
+    };
+  }, [wakeLockEnabled]);
+
+  const handleToggleWakeLock = () => {
+    if (!navigator?.wakeLock?.request && !wakeLockEnabled) {
+      showNotification('Wake Lock not supported on this browser; increase Screen Auto-Lock time or run the PC 24/7 Engine.', 'INFO');
+    }
+    setWakeLockEnabled(prev => !prev);
   };
 
   // Actions
@@ -873,6 +915,9 @@ export function App() {
           <MarketScannerPanel
             marketAnalysis={marketAnalysis}
             autopilotStatus={autopilotStatus}
+            cloudEngine={cloudEngine}
+            wakeLockEnabled={wakeLockEnabled}
+            onToggleWakeLock={handleToggleWakeLock}
             onStartAutoPilot={handleStartAutoPilot}
             onStopAutoPilot={handleStopAutoPilot}
             onUpdateAutoPilotConfig={handleUpdateAutoPilotConfig}
@@ -904,6 +949,9 @@ export function App() {
             activeSymbol={activeSymbol}
             isLive={Boolean(account?.isLive)}
             availableBalance={Number(account?.availableBalance || 0)}
+            cloudEngine={cloudEngine}
+            wakeLockEnabled={wakeLockEnabled}
+            onToggleWakeLock={handleToggleWakeLock}
             onStartBot={handleStartBot}
             onStopBot={handleStopBot}
             onUpdateConfig={handleUpdateBotConfig}

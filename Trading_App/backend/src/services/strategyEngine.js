@@ -638,7 +638,9 @@ export class StrategyEngine {
           symbol: tradeSymbol,
           side: signal.action,
           amountUsdt: effectiveAllocation,
-          leverage: effectiveLeverage
+          leverage: effectiveLeverage,
+          tp: tpPrice,
+          sl: slPrice
         });
 
         const cleanSym = tradeSymbol.replace('/', '').toUpperCase();
