@@ -76,11 +76,12 @@ const broadcastAccountState = async () => {
 
 // Regular periodic balance & stats broadcast and 24/7 TP/SL/Margin Guardian auto-close check
 setInterval(async () => {
+  const analysisMap = marketAnalysis.getLatestAnalysisMap();
   if (paperTrading.isLive && binanceService.liveExchange) {
     try {
       const livePositions = await binanceService.getLivePositions();
       if (livePositions && livePositions.length > 0) {
-        await marginGuardian.evaluatePositions(livePositions, binanceService.getCurrentPrices(), true);
+        await marginGuardian.evaluatePositions(livePositions, binanceService.getCurrentPrices(), true, analysisMap);
       }
     } catch (e) {
       console.warn('[Margin Guardian Live Eval Error]', e.message);
@@ -88,7 +89,7 @@ setInterval(async () => {
   } else if (paperTrading.positions.length > 0) {
     const currentPrices = binanceService.getCurrentPrices();
     paperTrading.updateMarketPrices(currentPrices);
-    await marginGuardian.evaluatePositions(paperTrading.positions, currentPrices, false);
+    await marginGuardian.evaluatePositions(paperTrading.positions, currentPrices, false, analysisMap);
   }
 
   await broadcastAccountState();
@@ -606,7 +607,7 @@ setInterval(saveRuntimeState, 3000);
 
 // ================= CROSS-DEVICE REAL-TIME CLOUD SYNC (LAPTOP <-> MOBILE) ================= //
 const SYNC_DEVICE_ID = 'PC-' + Math.random().toString(36).slice(2, 10);
-const SYNC_TOPIC = 'apexalgo_cloud_sync_suneth2001_v3';
+const SYNC_TOPIC = 'apexalgo_cloud_sync_suneth2001_v4';
 let lastAppliedSyncTime = 0;
 let lastLocalControlTime = 0;
 let isApplyingRemoteSync = false;
@@ -661,7 +662,9 @@ async function pushCloudSync() {
       criticalMarginRatio: gSt.criticalMarginRatio,
       defaultStopLossPct: gSt.defaultStopLossPct,
       defaultTakeProfitPct: gSt.defaultTakeProfitPct,
-      trailingStopPct: gSt.trailingStopPct
+      trailingStopPct: gSt.trailingStopPct,
+      breakevenTriggerPct: gSt.breakevenTriggerPct,
+      smartProfitLockEnabled: gSt.smartProfitLockEnabled
     },
     lastAutoTradeTime: marketAnalysis.lastAutoTradeTime || 0
   };

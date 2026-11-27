@@ -225,6 +225,36 @@ export function PositionsPanel({
                       </div>
                     </div>
 
+                    {/* Profit-Lock Status & TP/SL Strip */}
+                    {(pos.profitLockFloorPct > 0 || pos.tp || pos.sl) && (
+                      <div style={{
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'center',
+                        flexWrap: 'wrap',
+                        gap: '6px',
+                        padding: '5px 8px',
+                        borderRadius: '5px',
+                        background: pos.profitLockFloorPct > 0 ? 'rgba(0, 245, 160, 0.08)' : 'rgba(255, 255, 255, 0.025)',
+                        border: `1px solid ${pos.profitLockFloorPct > 0 ? 'rgba(0, 245, 160, 0.3)' : 'var(--border-subtle)'}`,
+                        fontSize: '10px'
+                      }}>
+                        {pos.profitLockFloorPct > 0 ? (
+                          <span style={{ color: '#00F5A0', fontWeight: 800 }}>
+                            🔒 Profit Locked ≥ +{pos.profitLockFloorPct}% ROE (Peak +{pos.peakRoePct || pos.highestPnlPct || 0}%)
+                          </span>
+                        ) : (
+                          <span style={{ color: 'var(--text-muted)' }}>
+                            🛡️ Profit-Lock arms at +3.5% ROE
+                          </span>
+                        )}
+                        <div className="mono" style={{ display: 'flex', gap: '8px', color: 'var(--text-secondary)' }}>
+                          {pos.tp && <span style={{ color: '#00F5A0' }}>TP: ${pos.tp}</span>}
+                          {pos.sl && <span style={{ color: '#FF3366' }}>SL: ${pos.sl}</span>}
+                        </div>
+                      </div>
+                    )}
+
                     {/* Margin Guardian Auto-Close Meter */}
                     <div style={{ marginTop: '2px' }}>
                       <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '10px', marginBottom: '3px' }}>

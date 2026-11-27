@@ -5,8 +5,10 @@ export function MarginGuardianPanel({ guardianSettings, onUpdateSettings }) {
   const [enabled, setEnabled] = useState(guardianSettings?.enabled ?? true);
   const [criticalMarginRatio, setCriticalMarginRatio] = useState(guardianSettings?.criticalMarginRatio || 80);
   const [defaultStopLossPct, setDefaultStopLossPct] = useState(guardianSettings?.defaultStopLossPct || 4.5);
-  const [defaultTakeProfitPct, setDefaultTakeProfitPct] = useState(guardianSettings?.defaultTakeProfitPct || 9.0);
-  const [trailingStopPct, setTrailingStopPct] = useState(guardianSettings?.trailingStopPct || 2.0);
+  const [defaultTakeProfitPct, setDefaultTakeProfitPct] = useState(guardianSettings?.defaultTakeProfitPct || 10.0);
+  const [trailingStopPct, setTrailingStopPct] = useState(guardianSettings?.trailingStopPct || 1.5);
+  const [breakevenTriggerPct, setBreakevenTriggerPct] = useState(guardianSettings?.breakevenTriggerPct || 3.5);
+  const [smartProfitLockEnabled, setSmartProfitLockEnabled] = useState(guardianSettings?.smartProfitLockEnabled ?? true);
   const [maxAccountDrawdownPct, setMaxAccountDrawdownPct] = useState(guardianSettings?.maxAccountDrawdownPct || 15.0);
   const [isSaved, setIsSaved] = useState(false);
 
@@ -17,6 +19,8 @@ export function MarginGuardianPanel({ guardianSettings, onUpdateSettings }) {
     if (guardianSettings.defaultStopLossPct !== undefined) setDefaultStopLossPct(guardianSettings.defaultStopLossPct);
     if (guardianSettings.defaultTakeProfitPct !== undefined) setDefaultTakeProfitPct(guardianSettings.defaultTakeProfitPct);
     if (guardianSettings.trailingStopPct !== undefined) setTrailingStopPct(guardianSettings.trailingStopPct);
+    if (guardianSettings.breakevenTriggerPct !== undefined) setBreakevenTriggerPct(guardianSettings.breakevenTriggerPct);
+    if (guardianSettings.smartProfitLockEnabled !== undefined) setSmartProfitLockEnabled(guardianSettings.smartProfitLockEnabled);
     if (guardianSettings.maxAccountDrawdownPct !== undefined) setMaxAccountDrawdownPct(guardianSettings.maxAccountDrawdownPct);
   }, [guardianSettings]);
 
@@ -27,6 +31,8 @@ export function MarginGuardianPanel({ guardianSettings, onUpdateSettings }) {
       defaultStopLossPct,
       defaultTakeProfitPct,
       trailingStopPct,
+      breakevenTriggerPct,
+      smartProfitLockEnabled,
       maxAccountDrawdownPct
     });
     setIsSaved(true);
@@ -115,7 +121,7 @@ export function MarginGuardianPanel({ guardianSettings, onUpdateSettings }) {
       }}>
         <Info size={18} color="#00D2FF" style={{ flexShrink: 0, marginTop: '2px' }} />
         <div>
-          <strong style={{ color: '#00D2FF' }}>How Margin Got Time Auto-Close Works:</strong> In volatile crypto futures markets, exchange liquidations occur at 100% margin ratio, wiping out 100% of your collateral plus heavy penalty fees. Margin Guardian actively watches every position in the background (every 500ms). When adverse movement causes the margin ratio to hit your threshold (e.g. <strong>{criticalMarginRatio}%</strong>), it executes an instant auto-close, preserving your remaining capital before exchange liquidation!
+          <strong style={{ color: '#00D2FF' }}>How Smart Profit-Lock &amp; Margin Guardian Work:</strong> Margin Guardian watches every position every 500ms. Aside from emergency liquidation prevention at <strong>{criticalMarginRatio}%</strong>, the <strong>Stepped Profit-Lock Ratchet</strong> locks in fee-safe green profit once ROE hits <strong>+{breakevenTriggerPct}%</strong> (+3.5% → Breakeven Lock, +6% → +3.6% Floor, +9% → +6.2% Floor, +14% → +10.5% Floor) so winning trades never turn into losses!
         </div>
       </div>
 
@@ -251,6 +257,54 @@ export function MarginGuardianPanel({ guardianSettings, onUpdateSettings }) {
           />
           <div style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>
             After position is in profit, auto-closes if price retraces by this pullback amount.
+          </div>
+        </div>
+
+        {/* 5. Smart Profit-Lock & Auto-Breakeven Trigger */}
+        <div style={{
+          background: 'rgba(0, 245, 160, 0.03)',
+          border: '1px solid rgba(0, 245, 160, 0.25)',
+          borderRadius: 'var(--radius-sm)',
+          padding: '14px',
+          display: 'flex',
+          flexDirection: 'column',
+          gap: '10px'
+        }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <span style={{ fontSize: '13px', fontWeight: 700, color: '#00F5A0' }}>
+              Auto-Breakeven &amp; Profit-Lock Trigger
+            </span>
+            <span className="mono" style={{ fontSize: '16px', fontWeight: 800, color: '#00F5A0' }}>
+              +{breakevenTriggerPct}%
+            </span>
+          </div>
+          <input
+            type="range"
+            min="2.0"
+            max="8.0"
+            step="0.5"
+            value={breakevenTriggerPct}
+            onChange={(e) => setBreakevenTriggerPct(Number(e.target.value))}
+            style={{ accentColor: '#00F5A0', cursor: 'pointer', width: '100%' }}
+          />
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '11px', color: 'var(--text-secondary)' }}>
+            <span>Stepped Ladder (+3.5% / +6% / +9% / +14%)</span>
+            <button
+              type="button"
+              onClick={() => setSmartProfitLockEnabled(!smartProfitLockEnabled)}
+              style={{
+                background: smartProfitLockEnabled ? 'rgba(0, 245, 160, 0.16)' : 'rgba(255,51,102,0.14)',
+                border: `1px solid ${smartProfitLockEnabled ? '#00F5A0' : '#FF3366'}`,
+                color: smartProfitLockEnabled ? '#00F5A0' : '#FF3366',
+                borderRadius: '4px',
+                padding: '2px 8px',
+                fontSize: '10px',
+                fontWeight: 800,
+                cursor: 'pointer'
+              }}
+            >
+              {smartProfitLockEnabled ? 'RATCHET ON' : 'OFF'}
+            </button>
           </div>
         </div>
       </div>

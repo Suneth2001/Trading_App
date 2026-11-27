@@ -415,13 +415,88 @@ export function calculateAllIndicators(candles) {
   }
 
   const trendStrength = Math.min(50, Math.max(18, Math.abs(((ema9 - ema50) / ema50) * 1000) + 20));
+  let adxVal = Number(trendStrength.toFixed(2));
+  let pdi = ema9 >= ema21 ? 28 : 16;
+  let mdi = ema9 < ema21 ? 28 : 16;
+  if (candles.length >= 20) {
+    const trList = [];
+    const pdmList = [];
+    const mdmList = [];
+    for (let i = 1; i < candles.length; i++) {
+      const hDiff = candles[i].high - candles[i - 1].high;
+      const lDiff = candles[i - 1].low - candles[i].low;
+      pdmList.push(hDiff > lDiff && hDiff > 0 ? hDiff : 0);
+      mdmList.push(lDiff > hDiff && lDiff > 0 ? lDiff : 0);
+      trList.push(Math.max(
+        candles[i].high - candles[i].low,
+        Math.abs(candles[i].high - candles[i - 1].close),
+        Math.abs(candles[i].low - candles[i - 1].close)
+      ));
+    }
+    const len = 14;
+    const recentTr = trList.slice(-len).reduce((a, b) => a + b, 0) || 1;
+    const recentPdm = pdmList.slice(-len).reduce((a, b) => a + b, 0);
+    const recentMdm = mdmList.slice(-len).reduce((a, b) => a + b, 0);
+    pdi = Number(((recentPdm / recentTr) * 100).toFixed(2));
+    mdi = Number(((recentMdm / recentTr) * 100).toFixed(2));
+    const dx = (pdi + mdi) > 0 ? (Math.abs(pdi - mdi) / (pdi + mdi)) * 100 : 20;
+    adxVal = Number(dx.toFixed(2));
+  }
   const adx = {
-    adx: Number(trendStrength.toFixed(2)),
-    pdi: ema9 >= ema21 ? 28 : 16,
-    mdi: ema9 < ema21 ? 28 : 16,
-    isTrending: trendStrength >= 22,
-    isStrongTrend: trendStrength >= 32,
-    trendDirection: ema9 > ema21 ? 'BULLISH' : 'BEARISH'
+    adx: adxVal,
+    pdi,
+    mdi,
+    isTrending: adxVal >= 22,
+    isStrongTrend: adxVal >= 32,
+    trendDirection: pdi > mdi + 3 ? 'BULLISH' : mdi > pdi + 3 ? 'BEARISH' : 'NEUTRAL'
+  };
+
+  // Real Trap & Fakeout Detection
+  let isBullTrap = false;
+  let isBearTrap = false;
+  let isFallingKnife = false;
+  let trapAlert = null;
+  if (n >= 3) {
+    const ppC = candles[n - 3];
+    const testedHigh = Math.max(prevC.high, currC.high);
+    isBullTrap = (testedHigh >= structure.resistance || (currBb.upper && testedHigh >= currBb.upper)) &&
+      currC.close < structure.resistance &&
+      (currC.close < currC.open || (currC.high - Math.max(currC.open, currC.close)) > Math.abs(currC.close - currC.open));
+    const testedLow = Math.min(prevC.low, currC.low);
+    isBearTrap = (testedLow <= structure.support || (currBb.lower && testedLow <= currBb.lower)) &&
+      currC.close > structure.support &&
+      currC.close > currC.open;
+    const isRed3 = currC.close < currC.open && prevC.close < prevC.open && ppC.close < ppC.open;
+    const dropPct = ppC.open > 0 ? ((ppC.open - currC.close) / ppC.open) * 100 : 0;
+    const lowWick = Math.min(currC.open, currC.close) - currC.low;
+    const redBody = currC.open - currC.close;
+    isFallingKnife = isRed3 && dropPct > 2.0 && volumeSurgeRatio > 1.4 && lowWick < redBody * 0.3;
+    if (isBullTrap) trapAlert = 'BULL TRAP FAKEOUT (Resistance Rejection)';
+    else if (isBearTrap) trapAlert = 'BEAR TRAP / LIQUIDITY SWEEP (Support Reclaim)';
+    else if (isFallingKnife) trapAlert = 'FALLING KNIFE (High Momentum Dump - Avoid Longs)';
+  }
+
+  // Session VWAP, ROC-5, Overextension & Candle Strength
+  let cumPv = 0;
+  let cumVol = 0;
+  for (const c of candles.slice(-48)) {
+    const tp = (c.high + c.low + c.close) / 3;
+    const v = Math.max(0.0001, c.volume || 1);
+    cumPv += tp * v;
+    cumVol += v;
+  }
+  const vwapVal = cumVol > 0 ? cumPv / cumVol : price;
+  const distFromVwapPct = vwapVal > 0 ? Number((((price - vwapVal) / vwapVal) * 100).toFixed(2)) : 0;
+  const prev5Close = n > 5 ? closes[n - 6] : closes[0];
+  const roc5 = prev5Close > 0 ? Number((((price - prev5Close) / prev5Close) * 100).toFixed(2)) : 0;
+  const atrDistFromEma21 = Number(((price - ema21) / Math.max(currentAtr, price * 0.001)).toFixed(2));
+  const last3 = candles.slice(-3);
+  const candleStrength = {
+    isBullishCandle: currC.close > currC.open,
+    isBearishCandle: currC.close < currC.open,
+    bodyRatio: range > 0 ? Number((body / range).toFixed(2)) : 0,
+    last3Bullish: last3.filter(c => c.close > c.open).length,
+    last3Bearish: last3.filter(c => c.close < c.open).length
   };
 
   return {
@@ -461,6 +536,14 @@ export function calculateAllIndicators(candles) {
     adx,
     atr: Number(currentAtr.toFixed(4)),
     atrPct,
+    vwap: {
+      value: Number(vwapVal.toFixed(4)),
+      priceAboveVwap: price >= vwapVal,
+      distFromVwapPct
+    },
+    roc5,
+    atrDistFromEma21,
+    candleStrength,
     volume: {
       current: volumes[n - 1],
       ma20: currentVolMa,
@@ -472,7 +555,7 @@ export function calculateAllIndicators(candles) {
     divergence,
     structure,
     candlePatterns,
-    traps: { isBullTrap: false, isBearTrap: false, isFallingKnife: false, alert: null }
+    traps: { isBullTrap, isBearTrap, isFallingKnife, alert: trapAlert }
   };
 }
 
@@ -516,14 +599,18 @@ class StandaloneTradingEngine {
     this.livePositionTargets = savedState.livePositionTargets || {};
     this.tradeCounter = (this.positions.length + this.orderHistory.length) + 1;
 
-    this.guardianSettings = savedState.guardianSettings ?? {
+    this.guardianSettings = {
       enabled: true,
       criticalMarginRatio: 80,
       defaultStopLossPct: 4.5,
-      defaultTakeProfitPct: 9.0,
-      trailingStopPct: 2.0,
+      defaultTakeProfitPct: 10.0,
+      trailingStopPct: 1.5,
+      breakevenTriggerPct: 3.5,
+      smartProfitLockEnabled: true,
+      maxTpRoeCapPct: 16.0,
       maxAccountDrawdownPct: 15.0,
-      recentAlerts: []
+      recentAlerts: [],
+      ...(savedState.guardianSettings || {})
     };
 
     this.botStatus = savedState.botStatus ?? {
@@ -533,13 +620,14 @@ class StandaloneTradingEngine {
       direction: 'BOTH',
       allocationUsdt: 500,
       leverage: 10,
-      stopLossPct: 4.0,
-      takeProfitPct: 8.0,
-      trailingStopPct: 2.0,
+      stopLossPct: 4.5,
+      takeProfitPct: 10.0,
+      trailingStopPct: 1.5,
       timeframe: '15m',
       lastScanSummary: null,
       recentLogs: []
     };
+    this.btcMacroBias = { direction: 'NEUTRAL', isDumping: false, isPumping: false };
     if (!this.botStatus.symbol) this.botStatus.symbol = 'AUTO_BEST';
 
     this.autopilotStatus = savedState.autopilotStatus ?? {
@@ -567,7 +655,7 @@ class StandaloneTradingEngine {
 
     // Cross-Device Real-Time Cloud Sync (Laptop <-> Mobile iPhone/Android)
     this.deviceId = 'MOB-' + Math.random().toString(36).slice(2, 10);
-    this.syncTopic = 'apexalgo_cloud_sync_suneth2001_v3';
+    this.syncTopic = 'apexalgo_cloud_sync_suneth2001_v4';
     this.lastAppliedSyncTime = savedState.lastAppliedSyncTime || 0;
     this.lastLocalControlTime = 0;
     this.syncWs = null;
@@ -664,7 +752,9 @@ class StandaloneTradingEngine {
         criticalMarginRatio: this.guardianSettings.criticalMarginRatio,
         defaultStopLossPct: this.guardianSettings.defaultStopLossPct,
         defaultTakeProfitPct: this.guardianSettings.defaultTakeProfitPct,
-        trailingStopPct: this.guardianSettings.trailingStopPct
+        trailingStopPct: this.guardianSettings.trailingStopPct,
+        breakevenTriggerPct: this.guardianSettings.breakevenTriggerPct,
+        smartProfitLockEnabled: this.guardianSettings.smartProfitLockEnabled
       },
       lastAutoTradeTime: this.lastAutoTradeTime
     };
@@ -934,12 +1024,16 @@ class StandaloneTradingEngine {
       });
     } catch {}
 
-    const targetNotional = Math.max(pairInfo.minNotional || 5.5, Number(amountUsdt) * Number(leverage));
+    const minNotional = pairInfo.minNotional || 5.5;
+    const minQty = pairInfo.minQty || 0.001;
+    const targetNotional = Math.max(minNotional, Number(amountUsdt) * Number(leverage));
     const rawQty = targetNotional / price;
     const stepDecimals = pairInfo.stepDecimals !== undefined ? pairInfo.stepDecimals : 2;
     const factor = Math.pow(10, stepDecimals);
-    const roundedUp = Math.ceil(rawQty * factor) / factor;
-    const quantity = Number(Math.max(pairInfo.minQty || 0.001, roundedUp).toFixed(stepDecimals));
+    const floored = Math.floor(rawQty * factor) / factor;
+    const ceiled = Math.ceil(rawQty * factor) / factor;
+    const minReqQty = Math.max(minQty, Math.ceil((minNotional / price) * factor) / factor);
+    const quantity = Number(((floored >= minReqQty && floored * price >= minNotional) ? floored : Math.max(minReqQty, ceiled)).toFixed(stepDecimals));
     if (quantity <= 0) throw new Error(`Order size too small for ${cleanSym}`);
 
     const orderSide = side === 'LONG' ? 'BUY' : 'SELL';
@@ -1145,7 +1239,8 @@ class StandaloneTradingEngine {
     const normInterval = (interval || '15m').toLowerCase();
     const key = `${symbol}-${normInterval}`;
     const now = Date.now();
-    if (this.candlesCache[key] && now - (this.candlesCacheTime[key] || 0) < 4000) {
+    const ttl = (normInterval === '1h' || normInterval === '4h') ? 45000 : 8000;
+    if (this.candlesCache[key] && now - (this.candlesCacheTime[key] || 0) < ttl) {
       return this.candlesCache[key];
     }
     try {
@@ -1353,6 +1448,10 @@ class StandaloneTradingEngine {
     if (!activeList || activeList.length === 0) return;
     const g = this.guardianSettings;
     const toClose = [];
+    const analysisMap = {};
+    for (const item of this.marketAnalysisCache || []) {
+      analysisMap[item.symbol] = item;
+    }
 
     for (const pos of activeList) {
       const price = this.prices[pos.symbol] || pos.currentPrice;
@@ -1363,31 +1462,87 @@ class StandaloneTradingEngine {
         : (pos.entryPrice - price) * pos.size;
       pos.unrealizedPnl = Number(pnl.toFixed(2));
       pos.roePct = Number(((pnl / Math.max(0.01, pos.margin)) * 100).toFixed(2));
-      if (pos.roePct > (pos.highestPnlPct || 0)) {
-        pos.highestPnlPct = pos.roePct;
-        if (this.isLive && this.livePositionTargets[pos.id]) {
-          this.livePositionTargets[pos.id].highestPnlPct = pos.roePct;
-        }
+
+      // Persistent Peak ROE tracking (Live & Demo)
+      if (this.isLive && !this.livePositionTargets[pos.id]) {
+        const symT = this.livePositionTargets[pos.symbol] || {};
+        this.livePositionTargets[pos.id] = {
+          tp: pos.tp || symT.tp || null,
+          sl: pos.sl || symT.sl || null,
+          trailingStopPct: pos.trailingStopPct || symT.trailingStopPct || g.trailingStopPct,
+          highestPnlPct: Math.max(pos.highestPnlPct || 0, pos.roePct || 0, 0)
+        };
+      }
+      const prevPeak = this.isLive ? (this.livePositionTargets[pos.id]?.highestPnlPct || 0) : (pos.highestPnlPct || 0);
+      const peakRoe = Math.max(prevPeak, pos.highestPnlPct || 0, pos.roePct || 0, 0);
+      pos.highestPnlPct = Number(peakRoe.toFixed(2));
+      pos.peakRoePct = pos.highestPnlPct;
+      if (this.isLive && this.livePositionTargets[pos.id]) {
+        this.livePositionTargets[pos.id].highestPnlPct = pos.highestPnlPct;
       }
 
       const maint = pos.size * price * (this.isLive ? 0.01 : 0.005);
       const marginBal = Math.max(0.01, pos.margin + pnl);
       pos.marginRatio = Number(Math.min(100, Math.max(0.5, (maint / marginBal) * 100)).toFixed(2));
 
+      // Multi-Stage Fee-Aware Profit-Lock Ratchet
+      const lev = Number(pos.leverage || 10);
+      const feeFloorRoe = Number(Math.max(1.0, 0.12 * lev).toFixed(2));
+      const baseTrail = Number(pos.trailingStopPct || g.trailingStopPct || 1.5);
+      const beTrigger = Number(g.breakevenTriggerPct || 3.5);
+      let lockedFloorPct = null;
+      let dynamicTrailPct = baseTrail;
+
+      if (g.smartProfitLockEnabled !== false) {
+        if (peakRoe >= 20) {
+          lockedFloorPct = 15.5;
+          dynamicTrailPct = Math.min(baseTrail, 2.0);
+        } else if (peakRoe >= 14) {
+          lockedFloorPct = 10.5;
+          dynamicTrailPct = Math.min(baseTrail, 1.8);
+        } else if (peakRoe >= 9) {
+          lockedFloorPct = 6.2;
+          dynamicTrailPct = Math.min(baseTrail, 1.5);
+        } else if (peakRoe >= 6) {
+          lockedFloorPct = 3.6;
+          dynamicTrailPct = Math.min(baseTrail, 1.4);
+        } else if (peakRoe >= beTrigger) {
+          lockedFloorPct = Number(Math.max(1.2, feeFloorRoe + 0.3).toFixed(2));
+          dynamicTrailPct = Math.min(baseTrail, 1.5);
+        }
+      }
+      pos.profitLockFloorPct = lockedFloorPct;
+
       if (!g.enabled) continue;
+
+      const rawTpRoe = pos.tp && pos.entryPrice
+        ? Math.abs(((pos.tp - pos.entryPrice) / pos.entryPrice) * 100 * lev)
+        : (g.defaultTakeProfitPct || 10.0);
+      const effectiveTpRoe = Math.min(rawTpRoe, Math.max(g.defaultTakeProfitPct || 10.0, g.maxTpRoeCapPct || 16.0));
+      const rawSlRoe = pos.sl && pos.entryPrice
+        ? Math.abs(((pos.entryPrice - pos.sl) / pos.entryPrice) * 100 * lev)
+        : (g.defaultStopLossPct || 4.5);
+      const effectiveSlRoe = Math.min(rawSlRoe, Math.max(g.defaultStopLossPct || 4.5, 7.5));
 
       if (pos.marginRatio >= g.criticalMarginRatio) {
         toClose.push({ id: pos.id, reason: 'MARGIN_GUARDIAN_AUTO_CLOSE', detail: `Margin Ratio hit ${pos.marginRatio}%` });
       } else if (pos.tp && ((pos.side === 'LONG' && price >= pos.tp) || (pos.side === 'SHORT' && price <= pos.tp))) {
-        toClose.push({ id: pos.id, reason: 'AUTO_TAKE_PROFIT', detail: `Target TP reached ($${price})` });
+        toClose.push({ id: pos.id, reason: 'AUTO_TAKE_PROFIT', detail: `Target TP reached ($${price}, +${pos.roePct}% ROE)` });
+      } else if (pos.roePct >= effectiveTpRoe) {
+        toClose.push({ id: pos.id, reason: 'AUTO_TAKE_PROFIT', detail: `Take-Profit secured at +${pos.roePct}% ROE` });
+      } else if (lockedFloorPct !== null && pos.roePct <= lockedFloorPct) {
+        toClose.push({ id: pos.id, reason: 'PROFIT_LOCK_PROTECTED', detail: `Profit-Lock saved +${pos.roePct}% ROE (Peak +${peakRoe}%, Floor +${lockedFloorPct}%)` });
+      } else if (lockedFloorPct !== null && peakRoe >= Math.max(5.0, feeFloorRoe + 2.5) && (peakRoe - pos.roePct) >= dynamicTrailPct) {
+        toClose.push({ id: pos.id, reason: 'TRAILING_PROFIT_LOCK', detail: `Trailing Profit Locked +${pos.roePct}% ROE (Peak +${peakRoe}%)` });
+      } else if (analysisMap[pos.symbol] && pos.roePct >= Math.max(4.5, feeFloorRoe + 3.0) && (
+        (pos.side === 'LONG' && (analysisMap[pos.symbol].rsi >= 75 || analysisMap[pos.symbol].trapWarning?.includes('BULL TRAP') || (analysisMap[pos.symbol].supertrend === 'BEARISH' && analysisMap[pos.symbol].macdHistogram < 0))) ||
+        (pos.side === 'SHORT' && (analysisMap[pos.symbol].rsi <= 25 || analysisMap[pos.symbol].trapWarning?.includes('BEAR TRAP') || (analysisMap[pos.symbol].supertrend === 'BULLISH' && analysisMap[pos.symbol].macdHistogram > 0)))
+      )) {
+        toClose.push({ id: pos.id, reason: 'SMART_PROFIT_TAKE', detail: `Momentum exhaustion exit at +${pos.roePct}% ROE` });
       } else if (pos.sl && ((pos.side === 'LONG' && price <= pos.sl) || (pos.side === 'SHORT' && price >= pos.sl))) {
-        toClose.push({ id: pos.id, reason: 'AUTO_STOP_LOSS', detail: `Target SL hit ($${price})` });
-      } else if (pos.roePct >= g.defaultTakeProfitPct && !pos.tp) {
-        toClose.push({ id: pos.id, reason: 'AUTO_TAKE_PROFIT', detail: `ROE reached +${pos.roePct}%` });
-      } else if (pos.roePct <= -g.defaultStopLossPct && !pos.sl) {
-        toClose.push({ id: pos.id, reason: 'AUTO_STOP_LOSS', detail: `ROE hit ${pos.roePct}%` });
-      } else if (pos.highestPnlPct >= 2.5 && (pos.highestPnlPct - pos.roePct) >= (pos.trailingStopPct || g.trailingStopPct)) {
-        toClose.push({ id: pos.id, reason: 'TRAILING_STOP_LOCK', detail: `Trailing Stop locked profit from +${pos.highestPnlPct}% peak` });
+        toClose.push({ id: pos.id, reason: 'AUTO_STOP_LOSS', detail: `Stop-Loss hit ($${price}, ${pos.roePct}% ROE)` });
+      } else if (pos.roePct <= -effectiveSlRoe) {
+        toClose.push({ id: pos.id, reason: 'AUTO_STOP_LOSS', detail: `Disciplined Stop-Loss hit at ${pos.roePct}% ROE` });
       }
     }
 
@@ -1422,32 +1577,104 @@ class StandaloneTradingEngine {
     const results = [];
     for (const pair of DEFAULT_PAIRS) {
       try {
-        const candles = await this.fetchKlines(pair.symbol, '15m', 60);
+        const [candles, candles1h, candles5m] = await Promise.all([
+          this.fetchKlines(pair.symbol, '15m', 65),
+          this.fetchKlines(pair.symbol, '1h', 55),
+          this.fetchKlines(pair.symbol, '5m', 45)
+        ]);
         const ind = calculateAllIndicators(candles);
+        const ind1h = calculateAllIndicators(candles1h);
+        const ind5m = calculateAllIndicators(candles5m);
         const price = this.prices[pair.symbol] || ind?.price || 100;
         if (!ind) continue;
 
-        const atr = ind.atr || price * 0.015;
-        let longTrend = Math.min(25, (ind.supertrend.direction === 'BULLISH' ? 14 : 7) + (ind.ema.bullishAlignment ? 8 : ind.price >= ind.ema.ema21 ? 6 : 3) + (ind.adx.isTrending ? 3 : 1));
-        let longStruct = Math.min(25, (ind.structure.isTestingSupport ? 15 : 11) + (ind.candlePatterns.some(p => p.type === 'BULLISH') ? 6 : 3) + (ind.structure.distToResistancePct >= 1.0 ? 4 : 2));
-        let longMom = Math.min(25, (ind.divergence.detected && ind.divergence.type.startsWith('BULLISH') ? 13 : 9) + (ind.macd.histogram >= 0 ? 7 : 3) + (ind.rsi >= 42 && ind.rsi <= 68 ? 5 : ind.rsi < 38 ? 6 : 2));
-        let longVol = Math.min(25, (ind.volume.isHighVolume ? 13 : 10) + (ind.bollinger.isSqueeze ? 6 : 3) + (ind.volume.obv.isAccumulation ? 6 : 3));
+        if (pair.symbol === 'BTCUSDT') {
+          const b1hBull = ind1h ? (ind1h.supertrend.direction === 'BULLISH' && ind1h.price >= ind1h.ema.ema21) : true;
+          const b1hBear = ind1h ? (ind1h.supertrend.direction === 'BEARISH' && ind1h.price <= ind1h.ema.ema21) : false;
+          const isDumping = (ind.roc5 < -1.1 && ind.supertrend.direction === 'BEARISH') || Boolean(ind.traps?.isFallingKnife);
+          const isPumping = ind.roc5 > 1.1 && ind.supertrend.direction === 'BULLISH';
+          let dir = 'NEUTRAL';
+          if ((b1hBull && ind.supertrend.direction === 'BULLISH') || isPumping) dir = 'BULLISH';
+          else if ((b1hBear && ind.supertrend.direction === 'BEARISH') || isDumping) dir = 'BEARISH';
+          this.btcMacroBias = { direction: dir, isDumping, isPumping };
+        }
 
-        let shortTrend = Math.min(25, (ind.supertrend.direction === 'BEARISH' ? 14 : 7) + (ind.ema.bearishAlignment ? 8 : ind.price < ind.ema.ema21 ? 6 : 3) + (ind.adx.isTrending ? 3 : 1));
-        let shortStruct = Math.min(25, (ind.structure.isTestingResistance ? 15 : 11) + (ind.candlePatterns.some(p => p.type === 'BEARISH') ? 6 : 3) + (ind.structure.distToSupportPct >= 1.0 ? 4 : 2));
-        let shortMom = Math.min(25, (ind.divergence.detected && ind.divergence.type.startsWith('BEARISH') ? 13 : 9) + (ind.macd.histogram < 0 ? 7 : 3) + (ind.rsi >= 32 && ind.rsi <= 58 ? 5 : ind.rsi > 62 ? 6 : 2));
-        let shortVol = Math.min(25, (ind.volume.isHighVolume ? 13 : 10) + (ind.bollinger.isSqueeze ? 6 : 3) + (!ind.volume.obv.isAccumulation ? 6 : 3));
+        const atr = ind.atr > 0 ? ind.atr : price * 0.012;
+        const isChoppy = ind.adx.adx < 18;
+        const priceAboveVwap = ind.vwap ? ind.vwap.priceAboveVwap : price >= ind.ema.ema21;
 
-        const longScore = Math.min(96, Math.max(20, longTrend + longStruct + longMom + longVol));
-        const shortScore = Math.min(96, Math.max(20, shortTrend + shortStruct + shortMom + shortVol));
+        let htfScoreBonus = 0;
+        let htfTrend = 'NEUTRAL';
+        if (ind1h) {
+          if (ind1h.supertrend.direction === 'BULLISH' && ind1h.price >= ind1h.ema.ema21) { htfTrend = 'BULLISH'; htfScoreBonus = 10; }
+          else if (ind1h.supertrend.direction === 'BEARISH' && ind1h.price <= ind1h.ema.ema21) { htfTrend = 'BEARISH'; htfScoreBonus = -10; }
+        }
+
+        let mtfStatus = 'CHOP';
+        let mtfSummary = '1H: Neutral ⚪ | 15M: Range-Bound ⚪';
+        if (htfTrend === 'BULLISH' && ind.supertrend.direction === 'BULLISH') {
+          mtfStatus = 'ALIGNED_BULLISH';
+          mtfSummary = '1H: Bullish 🟢 | 15M: Bullish 🟢 (MTF Confluence)';
+        } else if (htfTrend === 'BEARISH' && ind.supertrend.direction === 'BEARISH') {
+          mtfStatus = 'ALIGNED_BEARISH';
+          mtfSummary = '1H: Bearish 🔴 | 15M: Bearish 🔴 (MTF Confluence)';
+        } else if (htfTrend === 'BEARISH' && ind.supertrend.direction === 'BULLISH') {
+          mtfStatus = 'COUNTER_TREND_PULLBACK';
+          mtfSummary = '1H: Bearish 🔴 | 15M: Bounce 🟢 (Counter-Trend Risk)';
+        } else if (htfTrend === 'BULLISH' && ind.supertrend.direction === 'BEARISH') {
+          mtfStatus = 'COUNTER_TREND_PULLBACK';
+          mtfSummary = '1H: Bullish 🟢 | 15M: Pullback 🔴 (Counter-Trend Risk)';
+        }
+
+        const is5mBullConfirmed = ind5m
+          ? (ind5m.ema.ema9 >= ind5m.ema.ema21 && ind5m.macd.histogram >= ind5m.macd.prevHistogram && ind5m.rsi >= 42 && ind5m.rsi <= 71 && ind5m.candleStrength?.isBullishCandle)
+          : false;
+        const is5mBearConfirmed = ind5m
+          ? (ind5m.ema.ema9 <= ind5m.ema.ema21 && ind5m.macd.histogram <= ind5m.macd.prevHistogram && ind5m.rsi <= 58 && ind5m.rsi >= 29 && ind5m.candleStrength?.isBearishCandle)
+          : false;
+
+        const longOverextended = ind.atrDistFromEma21 > 1.8 || ind.rsi > 71 || ind.structure.distToResistancePct < 0.4;
+        const shortOverextended = ind.atrDistFromEma21 < -1.8 || ind.rsi < 29 || ind.structure.distToSupportPct < 0.4;
+        const longBtcAligned = !this.btcMacroBias.isDumping && this.btcMacroBias.direction !== 'BEARISH';
+        const shortBtcAligned = !this.btcMacroBias.isPumping && this.btcMacroBias.direction !== 'BULLISH';
+
+        let longTrend = 5 + (htfScoreBonus > 0 ? 7 : 0) + (ind.supertrend.direction === 'BULLISH' ? 5 : 0) + (ind.ema.bullishAlignment || ind.ema.goldenCross ? 4 : 0) + (priceAboveVwap ? 4 : 0) + (ind.adx.isTrending && ind.adx.trendDirection === 'BULLISH' ? 3 : 0) - (isChoppy ? 5 : 0);
+        longTrend = Math.min(25, Math.max(3, longTrend));
+        let longStruct = 5 + (ind.structure.isTestingSupport ? 7 : 0) + (ind.candlePatterns.some(p => p.type === 'BULLISH') ? 6 : 0) + (ind.structure.status === 'BREAKOUT_RESISTANCE' ? 6 : 0) + (ind.structure.distToResistancePct >= 1.2 ? 5 : 0) - (longOverextended ? 7 : 0);
+        longStruct = Math.min(25, Math.max(3, longStruct));
+        let longMom = 5 + (is5mBullConfirmed ? 7 : 0) + (ind.divergence.detected && ind.divergence.type.startsWith('BULLISH') ? 7 : 0) + (ind.stochRsi.isBullishCross || ind.stochRsi.k > ind.stochRsi.d ? 4 : 0) + (ind.macd.histogram > 0 ? 4 : 0) + (ind.rsi >= 42 && ind.rsi <= 65 ? 4 : ind.rsi > 71 ? -6 : 0);
+        longMom = Math.min(25, Math.max(3, longMom));
+        let longVol = 5 + (ind.volume.isHighVolume && ind.price >= ind.prevPrice ? 7 : 0) + (ind.volume.obv.isAccumulation ? 5 : 0) + (ind.bollinger.isSqueeze ? 4 : 0) + (ind.volume.surgeRatio > 1.15 ? 3 : 0) + (longBtcAligned ? 4 : this.btcMacroBias.isDumping ? -10 : 0);
+        longVol = Math.min(25, Math.max(3, longVol));
+
+        let shortTrend = 5 + (htfScoreBonus < 0 ? 7 : 0) + (ind.supertrend.direction === 'BEARISH' ? 5 : 0) + (ind.ema.bearishAlignment || ind.ema.deathCross ? 4 : 0) + (!priceAboveVwap ? 4 : 0) + (ind.adx.isTrending && ind.adx.trendDirection === 'BEARISH' ? 3 : 0) - (isChoppy ? 5 : 0);
+        shortTrend = Math.min(25, Math.max(3, shortTrend));
+        let shortStruct = 5 + (ind.structure.isTestingResistance ? 7 : 0) + (ind.candlePatterns.some(p => p.type === 'BEARISH') ? 6 : 0) + (ind.structure.status === 'BREAKDOWN_SUPPORT' ? 6 : 0) + (ind.structure.distToSupportPct >= 1.2 ? 5 : 0) - (shortOverextended ? 7 : 0);
+        shortStruct = Math.min(25, Math.max(3, shortStruct));
+        let shortMom = 5 + (is5mBearConfirmed ? 7 : 0) + (ind.divergence.detected && ind.divergence.type.startsWith('BEARISH') ? 7 : 0) + (ind.stochRsi.isBearishCross || ind.stochRsi.k < ind.stochRsi.d ? 4 : 0) + (ind.macd.histogram < 0 ? 4 : 0) + (ind.rsi >= 35 && ind.rsi <= 58 ? 4 : ind.rsi < 29 ? -6 : 0);
+        shortMom = Math.min(25, Math.max(3, shortMom));
+        let shortVol = 5 + (ind.volume.isHighVolume && ind.price <= ind.prevPrice ? 7 : 0) + (!ind.volume.obv.isAccumulation ? 5 : 0) + (ind.bollinger.isSqueeze ? 4 : 0) + (ind.volume.surgeRatio > 1.15 ? 3 : 0) + (shortBtcAligned ? 4 : this.btcMacroBias.isPumping ? -10 : 0);
+        shortVol = Math.min(25, Math.max(3, shortVol));
+
+        let longRaw = longTrend + longStruct + longMom + longVol;
+        let shortRaw = shortTrend + shortStruct + shortMom + shortVol;
+        if (ind.traps?.isBullTrap) { longRaw -= 25; shortRaw += 10; }
+        if (ind.traps?.isBearTrap) { shortRaw -= 25; longRaw += 10; }
+        if (ind.traps?.isFallingKnife) { longRaw = Math.min(42, longRaw); shortRaw += 12; }
+
+        const longScore = Math.min(98, Math.max(15, Math.round(longRaw)));
+        const shortScore = Math.min(98, Math.max(15, Math.round(shortRaw)));
         const isLong = longScore >= shortScore;
-        const slDist = Math.max(price * 0.015, atr * 1.2);
-        const tp1Dist = slDist * 1.8;
-        const tp2Dist = slDist * 3.0;
+
+        const lev = Math.max(1, Number(this.autopilotStatus?.config?.leverage || 10));
+        const slPricePct = Math.min(0.062 / lev, Math.max(0.042 / lev, Math.max(0.003, (atr / price) * 0.9)));
+        const slDist = price * slPricePct;
+        const tp1Dist = slDist * 2.1;
+        const tp2Dist = slDist * 3.2;
 
         const longSetup = {
           action: 'LONG',
-          rating: longScore >= 76 ? 'STRONG BUY' : longScore >= 58 ? 'BUY' : 'NEUTRAL',
+          rating: longScore >= 78 ? 'STRONG BUY' : longScore >= 60 ? 'BUY' : 'NEUTRAL',
           score: longScore,
           confidence: longScore,
           entryPrice: price,
@@ -1458,14 +1685,14 @@ class StandaloneTradingEngine {
           tp2Pct: Number(((tp2Dist / price) * 100).toFixed(2)),
           slPct: Number(((slDist / price) * 100).toFixed(2)),
           recommendedLeverage: 10,
-          riskRewardRatio: '1:1.8',
-          winRateProbability: Math.min(92, Math.round(longScore * 0.95)),
+          riskRewardRatio: '1:2.1',
+          winRateProbability: Math.min(93, Math.max(48, Math.round(longScore * 0.94))),
           confluenceBreakdown: { trend: longTrend, structure: longStruct, momentum: longMom, volume: longVol, total: longScore }
         };
 
         const shortSetup = {
           action: 'SHORT',
-          rating: shortScore >= 76 ? 'STRONG SELL' : shortScore >= 58 ? 'SELL' : 'NEUTRAL',
+          rating: shortScore >= 78 ? 'STRONG SELL' : shortScore >= 60 ? 'SELL' : 'NEUTRAL',
           score: shortScore,
           confidence: shortScore,
           entryPrice: price,
@@ -1476,13 +1703,16 @@ class StandaloneTradingEngine {
           tp2Pct: Number(((tp2Dist / price) * 100).toFixed(2)),
           slPct: Number(((slDist / price) * 100).toFixed(2)),
           recommendedLeverage: 10,
-          riskRewardRatio: '1:1.8',
-          winRateProbability: Math.min(92, Math.round(shortScore * 0.95)),
+          riskRewardRatio: '1:2.1',
+          winRateProbability: Math.min(93, Math.max(48, Math.round(shortScore * 0.94))),
           confluenceBreakdown: { trend: shortTrend, structure: shortStruct, momentum: shortMom, volume: shortVol, total: shortScore }
         };
 
         const dom = isLong ? longSetup : shortSetup;
         const stat = this.tickerStats[pair.symbol] || {};
+        const entry5mConfirmed = isLong ? is5mBullConfirmed : is5mBearConfirmed;
+        const isOverextended = isLong ? longOverextended : shortOverextended;
+        const btcAligned = isLong ? longBtcAligned : shortBtcAligned;
 
         results.push({
           symbol: pair.symbol,
@@ -1499,16 +1729,24 @@ class StandaloneTradingEngine {
           action: dom.action,
           confidence: dom.confidence,
           trend: isLong ? 'BULLISH ADVANCE' : 'BEARISH DISTRIBUTION',
-          mtfStatus: isLong ? 'ALIGNED_BULLISH' : 'ALIGNED_BEARISH',
-          mtfSummary: isLong ? '1H: Bullish 🟢 | 15M: Bullish 🟢 (MTF Confluence)' : '1H: Bearish 🔴 | 15M: Bearish 🔴 (MTF Confluence)',
+          mtfStatus,
+          mtfSummary,
           confluenceBreakdown: dom.confluenceBreakdown,
           divergence: ind.divergence.detected ? ind.divergence : null,
           marketStructure: ind.structure.status,
           structureLevels: ind.structure,
-          trapWarning: null,
-          isFallingKnife: false,
+          trapWarning: ind.traps?.alert || null,
+          isFallingKnife: Boolean(ind.traps?.isFallingKnife),
           candlePatterns: ind.candlePatterns.map(p => p.name),
           rsi: ind.rsi,
+          adx: ind.adx.adx,
+          vwap: ind.vwap?.value || price,
+          priceAboveVwap,
+          atrDistFromEma21: ind.atrDistFromEma21,
+          entry5mConfirmed,
+          btcAligned,
+          isChoppy,
+          isOverextended,
           stochRsiK: ind.stochRsi.k,
           stochRsiD: ind.stochRsi.d,
           macdHistogram: ind.macd.histogram,
@@ -1529,8 +1767,9 @@ class StandaloneTradingEngine {
             ? `Invalidated below support ($${ind.structure.support})`
             : `Invalidated above resistance ($${ind.structure.resistance})`,
           highlights: [
-            ind.supertrend.direction === 'BULLISH' ? '🟢 SuperTrend Bullish Support' : '🔴 SuperTrend Bearish Resistance',
-            `📊 RSI at ${ind.rsi} with Volume ${ind.volume.surgeRatio}x`
+            mtfSummary,
+            entry5mConfirmed ? '🎯 5M Precision Entry Trigger Confirmed' : `📊 ADX ${ind.adx.adx} | RSI ${ind.rsi}`,
+            ind.traps?.alert ? `⚠️ ${ind.traps.alert}` : `Volume ${ind.volume.surgeRatio}x`
           ],
           longSetup,
           shortSetup
@@ -1538,7 +1777,12 @@ class StandaloneTradingEngine {
       } catch {}
     }
 
-    results.sort((a, b) => Math.abs(b.score - 50) - Math.abs(a.score - 50));
+    results.sort((a, b) => {
+      const aReady = (a.entry5mConfirmed && a.mtfStatus?.startsWith('ALIGNED') && !a.isChoppy) ? 1 : 0;
+      const bReady = (b.entry5mConfirmed && b.mtfStatus?.startsWith('ALIGNED') && !b.isChoppy) ? 1 : 0;
+      if (aReady !== bReady) return bReady - aReady;
+      return b.confidence - a.confidence;
+    });
     this.marketAnalysisCache = results;
     this._saveState();
     this.emit('market_analysis_update', results);
@@ -1596,7 +1840,7 @@ class StandaloneTradingEngine {
 
     try {
       const now = Date.now();
-      if (now - this.lastAutoTradeTime < 20000) return;
+      if (now - this.lastAutoTradeTime < 45000) return;
       const cfg = this.autopilotStatus.config;
       const activePos = this.getActivePositions();
       if (activePos.length >= cfg.maxOpenTrades) return;
@@ -1627,6 +1871,14 @@ class StandaloneTradingEngine {
         if (coin.action === 'HOLD') continue;
         if (coin.action === 'LONG' && cfg.directionPreference === 'SHORT_ONLY') continue;
         if (coin.action === 'SHORT' && cfg.directionPreference === 'LONG_ONLY') continue;
+        if (coin.action === 'LONG' && coin.mtfStatus !== 'ALIGNED_BULLISH') continue;
+        if (coin.action === 'SHORT' && coin.mtfStatus !== 'ALIGNED_BEARISH') continue;
+        if (coin.isChoppy || !coin.entry5mConfirmed || coin.isOverextended) continue;
+        if (coin.action === 'LONG' && coin.rsi > 69) continue;
+        if (coin.action === 'SHORT' && coin.rsi < 31) continue;
+        if (coin.btcAligned === false || coin.isFallingKnife) continue;
+        if (coin.action === 'LONG' && coin.trapWarning?.includes('BULL TRAP')) continue;
+        if (coin.action === 'SHORT' && coin.trapWarning?.includes('BEAR TRAP')) continue;
         if (activePos.some(p => p.symbol === coin.symbol)) continue;
 
         if (this.isLive) {
@@ -1705,150 +1957,149 @@ class StandaloneTradingEngine {
     this.emit('bot_log', log);
   }
 
-  _calculateBotSignal(strategyId, ind) {
-    const { price, rsi, macd, bollinger, ema, adx, volume, supertrend, divergence, traps, candlePatterns } = ind;
+  _calculateBotSignal(strategyId, ind, ind1h = null, ind5m = null) {
+    const { price, rsi, macd, bollinger, ema, adx, volume, supertrend, divergence, traps, candlePatterns, vwap, atrDistFromEma21, stochRsi } = ind;
     let action = 'HOLD';
     let confidence = 50;
     let rationale = '';
 
+    const isChoppy = adx.adx < 18;
+    const htfBull = !ind1h || (ind1h.supertrend.direction === 'BULLISH' && ind1h.price >= ind1h.ema.ema21);
+    const htfBear = !ind1h || (ind1h.supertrend.direction === 'BEARISH' && ind1h.price <= ind1h.ema.ema21);
+    const ltfBullOk = !ind5m || (ind5m.ema.ema9 >= ind5m.ema.ema21 && ind5m.macd.histogram >= ind5m.macd.prevHistogram && ind5m.rsi <= 71);
+    const ltfBearOk = !ind5m || (ind5m.ema.ema9 <= ind5m.ema.ema21 && ind5m.macd.histogram <= ind5m.macd.prevHistogram && ind5m.rsi >= 29);
+    const aboveVwap = !vwap || vwap.priceAboveVwap;
+    const belowVwap = !vwap || !vwap.priceAboveVwap;
+    const overboughtBlock = rsi > 70 || atrDistFromEma21 > 1.8 || traps?.isBullTrap || traps?.isFallingKnife;
+    const oversoldBlock = rsi < 30 || atrDistFromEma21 < -1.8 || traps?.isBearTrap;
+
     switch (strategyId) {
       case 'trend_following': {
-        if ((ema.goldenCross || ema.bullishAlignment || supertrend.direction === 'BULLISH') && price >= ema.ema21 && rsi < 74) {
-          action = 'LONG';
-          confidence = 85;
-          rationale = `Trend Following Bullish: EMA9 >= EMA21 | SuperTrend BULL | ADX ${adx.adx}`;
-        } else if ((ema.deathCross || ema.bearishAlignment || supertrend.direction === 'BEARISH') && price <= ema.ema21 && rsi > 26) {
-          action = 'SHORT';
-          confidence = 85;
-          rationale = `Trend Following Bearish: EMA9 <= EMA21 | SuperTrend BEAR | ADX ${adx.adx}`;
-        } else if (supertrend.direction === 'BULLISH' && macd.histogram >= 0 && rsi < 68) {
-          action = 'LONG';
-          confidence = 78;
-          rationale = `Trend Continuation LONG: SuperTrend BULL & MACD Hist +${macd.histogram}`;
-        } else if (supertrend.direction === 'BEARISH' && macd.histogram < 0 && rsi > 32) {
-          action = 'SHORT';
-          confidence = 78;
-          rationale = `Trend Continuation SHORT: SuperTrend BEAR & MACD Hist ${macd.histogram}`;
+        if (!isChoppy && htfBull && (ema.bullishAlignment || supertrend.direction === 'BULLISH') && price >= ema.ema21 && aboveVwap && ltfBullOk && !overboughtBlock) {
+          action = 'LONG'; confidence = 86;
+          rationale = `3-TF Bull Trend: 1H+15M BULL | VWAP+ | ADX ${adx.adx} | RSI ${rsi}`;
+        } else if (!isChoppy && htfBear && (ema.bearishAlignment || supertrend.direction === 'BEARISH') && price <= ema.ema21 && belowVwap && ltfBearOk && !oversoldBlock) {
+          action = 'SHORT'; confidence = 86;
+          rationale = `3-TF Bear Trend: 1H+15M BEAR | Below VWAP | ADX ${adx.adx} | RSI ${rsi}`;
+        } else {
+          rationale = isChoppy ? `HOLD: Sideways chop (ADX ${adx.adx} < 18)` : `HOLD: Waiting for 1H+15M+5M & VWAP alignment`;
         }
         break;
       }
       case 'breakout_trading': {
-        if (price >= bollinger.middle && (macd.histogram >= 0 || volume.surgeRatio >= 1.05)) {
-          action = 'LONG';
-          confidence = 84;
-          rationale = `Bollinger Upper Expansion ($${price} > Mid $${bollinger.middle}) with ${volume.surgeRatio}x Vol`;
-        } else if (price < bollinger.middle && (macd.histogram < 0 || volume.surgeRatio >= 1.05)) {
-          action = 'SHORT';
-          confidence = 84;
-          rationale = `Bollinger Lower Breakdown ($${price} < Mid $${bollinger.middle}) with ${volume.surgeRatio}x Vol`;
+        if (volume.surgeRatio >= 1.2 && price > bollinger.middle && macd.isExpandingBullish && htfBull && ltfBullOk && !overboughtBlock) {
+          action = 'LONG'; confidence = 85;
+          rationale = `Confirmed Volume Breakout LONG (${volume.surgeRatio}x Vol, 1H+5M aligned)`;
+        } else if (volume.surgeRatio >= 1.2 && price < bollinger.middle && macd.histogram < 0 && htfBear && ltfBearOk && !oversoldBlock) {
+          action = 'SHORT'; confidence = 85;
+          rationale = `Confirmed Volume Breakdown SHORT (${volume.surgeRatio}x Vol, 1H+5M aligned)`;
+        } else {
+          rationale = `HOLD: Waiting for >=1.2x volume squeeze expansion (${volume.surgeRatio}x)`;
         }
         break;
       }
       case 'mean_reversion': {
-        if (rsi <= 48 || price <= bollinger.lower * 1.003) {
-          action = 'LONG';
-          confidence = 80;
-          rationale = `Mean Reversion Long Bounce: RSI ${rsi} near BB Lower`;
-        } else if (rsi >= 52 || price >= bollinger.upper * 0.997) {
-          action = 'SHORT';
-          confidence = 80;
-          rationale = `Mean Reversion Short Pullback: RSI ${rsi} near BB Upper`;
+        if ((rsi <= 34 || price <= bollinger.lower * 1.002) && (stochRsi.isBullishCross || macd.isContractingBearish || ind5m?.candleStrength?.isBullishCandle) && !traps?.isFallingKnife) {
+          action = 'LONG'; confidence = 82;
+          rationale = `Oversold Reversal Bounce: RSI ${rsi} + BB Lower bounce`;
+        } else if ((rsi >= 66 || price >= bollinger.upper * 0.998) && (stochRsi.isBearishCross || ind5m?.candleStrength?.isBearishCandle)) {
+          action = 'SHORT'; confidence = 82;
+          rationale = `Overbought Mean Rejection: RSI ${rsi} + BB Upper rejection`;
+        } else {
+          rationale = `HOLD: Price within fair value (RSI ${rsi})`;
         }
         break;
       }
       case 'momentum_scalper': {
-        if (macd.histogram >= 0 || rsi >= 52) {
-          action = 'LONG';
-          confidence = 83;
-          rationale = `Momentum Scalper Long: MACD Hist ${macd.histogram} & RSI ${rsi}`;
+        if (!isChoppy && macd.histogram > 0 && macd.isExpandingBullish && rsi >= 48 && rsi <= 67 && aboveVwap && ltfBullOk && !overboughtBlock) {
+          action = 'LONG'; confidence = 84;
+          rationale = `Turbo Momentum LONG: MACD expanding + VWAP + 5M trigger`;
+        } else if (!isChoppy && macd.histogram < 0 && macd.histogram < macd.prevHistogram && rsi <= 52 && rsi >= 33 && belowVwap && ltfBearOk && !oversoldBlock) {
+          action = 'SHORT'; confidence = 84;
+          rationale = `Turbo Momentum SHORT: MACD accelerating + Below VWAP + 5M trigger`;
         } else {
-          action = 'SHORT';
-          confidence = 83;
-          rationale = `Momentum Scalper Short: MACD Hist ${macd.histogram} & RSI ${rsi}`;
+          rationale = `HOLD: Insufficient clean momentum (ADX ${adx.adx}, RSI ${rsi})`;
         }
         break;
       }
       case 'swing_trader': {
-        if (supertrend.direction === 'BULLISH' || price >= ema.ema50) {
-          action = 'LONG';
-          confidence = 80;
-          rationale = `Swing Wave Bullish: SuperTrend ${supertrend.direction}`;
+        if (!isChoppy && htfBull && supertrend.direction === 'BULLISH' && price >= ema.ema50 && !overboughtBlock) {
+          action = 'LONG'; confidence = 82;
+          rationale = `Swing Wave LONG: 1H+15M SuperTrend BULL above EMA50`;
+        } else if (!isChoppy && htfBear && supertrend.direction === 'BEARISH' && price <= ema.ema50 && !oversoldBlock) {
+          action = 'SHORT'; confidence = 82;
+          rationale = `Swing Wave SHORT: 1H+15M SuperTrend BEAR below EMA50`;
         } else {
-          action = 'SHORT';
-          confidence = 80;
-          rationale = `Swing Wave Bearish: SuperTrend ${supertrend.direction}`;
+          rationale = `HOLD: Swing waiting for 1H+15M wave alignment`;
         }
         break;
       }
       case 'grid_dca': {
-        if (price <= ema.ema21 || rsi <= 50) {
-          action = 'LONG';
-          confidence = 76;
-          rationale = `Grid DCA Dip Buy: Price $${price} <= EMA21, RSI ${rsi}`;
+        if (atrDistFromEma21 <= -0.6 && rsi <= 45 && !traps?.isFallingKnife && (ind5m ? ind5m.candleStrength?.isBullishCandle : true)) {
+          action = 'LONG'; confidence = 78;
+          rationale = `Grid Dip Entry (${atrDistFromEma21} ATR dip, RSI ${rsi})`;
+        } else if (atrDistFromEma21 >= 0.6 && rsi >= 55 && (ind5m ? ind5m.candleStrength?.isBearishCandle : true)) {
+          action = 'SHORT'; confidence = 78;
+          rationale = `Grid Rally Entry (+${atrDistFromEma21} ATR rally, RSI ${rsi})`;
         } else {
-          action = 'SHORT';
-          confidence = 76;
-          rationale = `Grid DCA Peak Sell: Price $${price} > EMA21, RSI ${rsi}`;
+          rationale = `HOLD: Grid waiting for >=0.6 ATR deviation (${atrDistFromEma21})`;
         }
         break;
       }
       case 'arbitrage_scanner': {
-        const dev = ema.ema21 > 0 ? ((price - ema.ema21) / ema.ema21) * 100 : 0;
-        if (dev <= 0) {
-          action = 'LONG';
-          confidence = 78;
-          rationale = `Arbitrage Mean Capture Long: Spread ${dev.toFixed(2)}% below EMA21`;
+        const dev = vwap?.distFromVwapPct ?? 0;
+        if (dev <= -0.45 && rsi < 48 && !traps?.isFallingKnife) {
+          action = 'LONG'; confidence = 79;
+          rationale = `VWAP Discount Capture LONG (${dev.toFixed(2)}%)`;
+        } else if (dev >= 0.45 && rsi > 52) {
+          action = 'SHORT'; confidence = 79;
+          rationale = `VWAP Premium Capture SHORT (+${dev.toFixed(2)}%)`;
         } else {
-          action = 'SHORT';
-          confidence = 78;
-          rationale = `Arbitrage Mean Capture Short: Spread +${dev.toFixed(2)}% above EMA21`;
+          rationale = `HOLD: VWAP spread too tight (${dev.toFixed(2)}%)`;
         }
         break;
       }
       case 'ai_sentiment_ml':
       default: {
         let score = 0;
-        if (supertrend.direction === 'BULLISH') score += 25; else score -= 25;
-        if (ema.goldenCross) score += 25; else if (ema.deathCross) score -= 25;
-        else if (ema.bullishAlignment) score += 15; else if (ema.bearishAlignment) score -= 15;
-        else if (price >= ema.ema21) score += 10; else score -= 10;
-
-        if (macd.crossover === 'BULLISH') score += 18;
-        else if (macd.crossover === 'BEARISH') score -= 18;
-        else score += macd.histogram >= 0 ? 12 : -12;
-
-        if (rsi < 35) score += 15;
-        else if (rsi > 70) score -= 15;
-        else if (rsi >= 50) score += 8;
-        else score -= 8;
-
-        if (divergence?.detected) {
-          score += divergence.type.startsWith('BULLISH') ? 20 : -20;
+        if (supertrend.direction === 'BULLISH') score += 20; else score -= 20;
+        if (ind1h) {
+          if (ind1h.supertrend.direction === 'BULLISH' && ind1h.price >= ind1h.ema.ema21) score += 20;
+          else if (ind1h.supertrend.direction === 'BEARISH' && ind1h.price <= ind1h.ema.ema21) score -= 20;
         }
-        if (volume?.isHighVolume) {
-          score += score >= 0 ? 10 : -10;
+        if (vwap) score += vwap.priceAboveVwap ? 12 : -12;
+        if (ema.goldenCross) score += 18; else if (ema.deathCross) score -= 18;
+        else if (ema.bullishAlignment) score += 12; else if (ema.bearishAlignment) score -= 12;
+        if (macd.crossover === 'BULLISH') score += 15;
+        else if (macd.crossover === 'BEARISH') score -= 15;
+        else if (macd.isExpandingBullish) score += 10;
+        else if (macd.histogram < 0 && macd.histogram < macd.prevHistogram) score -= 10;
+        if (ind5m) {
+          if (ltfBullOk) score += 12;
+          else if (ltfBearOk) score -= 12;
         }
-        if (candlePatterns?.length > 0) {
-          for (const cp of candlePatterns) {
-            score += cp.type === 'BULLISH' ? 10 : -10;
-          }
-        }
+        if (rsi >= 42 && rsi <= 65) score += 8;
+        else if (rsi > 71) score -= 18;
+        else if (rsi < 29) score += 18;
+        if (divergence?.detected) score += divergence.type.startsWith('BULLISH') ? 16 : -16;
+        if (volume?.isHighVolume) score += score >= 0 ? 10 : -10;
+        if (isChoppy) score = Math.round(score * 0.5);
         if (traps?.isBullTrap) score -= 25;
         if (traps?.isBearTrap) score += 25;
-        if (traps?.isFallingKnife) score = Math.min(-25, score - 20);
+        if (traps?.isFallingKnife) score = Math.min(-30, score - 20);
 
-        if (score >= 15 && !traps?.isFallingKnife && !traps?.isBullTrap) {
+        if (score >= 35 && !isChoppy && htfBull && ltfBullOk && !overboughtBlock) {
           action = 'LONG';
-          confidence = Math.min(95, Math.round(62 + Math.abs(score) * 0.35));
-          rationale = `AI Confluence +${score} Bullish (SuperTrend: ${supertrend.direction}, RSI: ${rsi})`;
-        } else if (score <= -15 && !traps?.isBearTrap) {
+          confidence = Math.min(95, Math.round(68 + Math.abs(score) * 0.25));
+          rationale = `AI 3-TF Confluence +${score} LONG (1H+15M+5M aligned, ADX ${adx.adx})`;
+        } else if (score <= -35 && !isChoppy && htfBear && ltfBearOk && !oversoldBlock) {
           action = 'SHORT';
-          confidence = Math.min(95, Math.round(62 + Math.abs(score) * 0.35));
-          rationale = `AI Confluence ${score} Bearish (SuperTrend: ${supertrend.direction}, RSI: ${rsi})`;
+          confidence = Math.min(95, Math.round(68 + Math.abs(score) * 0.25));
+          rationale = `AI 3-TF Confluence ${score} SHORT (1H+15M+5M aligned, ADX ${adx.adx})`;
         } else {
           action = 'HOLD';
-          confidence = 55;
-          rationale = `AI Confluence neutral (score ${score}, RSI ${rsi})`;
+          confidence = Math.min(68, Math.max(45, Math.round(50 + Math.abs(score) * 0.2)));
+          rationale = isChoppy ? `HOLD: Choppy market (ADX ${adx.adx} < 18)` : `HOLD: Waiting for 3-TF alignment (Score ${score}, RSI ${rsi})`;
         }
         break;
       }
@@ -1927,12 +2178,18 @@ class StandaloneTradingEngine {
       const evalLimit = configuredSymbol === 'AUTO_BEST' ? 6 : Math.min(candidatePairs.length, 4);
 
       for (const pair of candidatePairs.slice(0, evalLimit)) {
-        const candles = await this.fetchKlines(pair.symbol, this.botStatus.timeframe || '15m', 60);
+        const [candles, candles1h, candles5m] = await Promise.all([
+          this.fetchKlines(pair.symbol, this.botStatus.timeframe || '15m', 65),
+          this.fetchKlines(pair.symbol, '1h', 55),
+          this.fetchKlines(pair.symbol, '5m', 45)
+        ]);
         const ind = calculateAllIndicators(candles);
         if (!ind) continue;
+        const ind1h = calculateAllIndicators(candles1h);
+        const ind5m = calculateAllIndicators(candles5m);
 
         const price = this.prices[pair.symbol] || ind.price;
-        const signal = this._calculateBotSignal(this.botStatus.activeStrategyId, ind);
+        const signal = this._calculateBotSignal(this.botStatus.activeStrategyId, ind, ind1h, ind5m);
         const existingPos = activePos.find(p => p.symbol === pair.symbol);
 
         const dirAllowed =
@@ -1979,15 +2236,24 @@ class StandaloneTradingEngine {
         (signal.action === 'SHORT' && this.botStatus.direction === 'LONG_ONLY');
 
       if (signal.action !== 'HOLD' && !isFiltered && (!existing || existing.side !== signal.action)) {
-        if (now - this.lastBotTradeTime > 20000) {
+        if (now - this.lastBotTradeTime > 45000) {
+          if (existing && existing.side !== signal.action) {
+            const heldMs = existing.openedAt ? (now - new Date(existing.openedAt).getTime()) : 0;
+            const curRoe = Number(existing.roePct || 0);
+            if (curRoe < 2.0 && (heldMs < 90000 || signal.confidence < 82)) {
+              return;
+            }
+          }
           const effAlloc = sizing.effectiveAllocation;
           const effLev = sizing.effectiveLeverage;
+          const tpRoePct = Math.min(Math.max(this.botStatus.takeProfitPct || 10.0, 6.0), 16.0);
+          const slRoePct = Math.min(Math.max(this.botStatus.stopLossPct || 4.5, 2.5), 7.5);
           const tp = signal.action === 'LONG'
-            ? price * (1 + this.botStatus.takeProfitPct / 100 / effLev)
-            : price * (1 - this.botStatus.takeProfitPct / 100 / effLev);
+            ? price * (1 + tpRoePct / 100 / effLev)
+            : price * (1 - tpRoePct / 100 / effLev);
           const sl = signal.action === 'LONG'
-            ? price * (1 - this.botStatus.stopLossPct / 100 / effLev)
-            : price * (1 + this.botStatus.stopLossPct / 100 / effLev);
+            ? price * (1 - slRoePct / 100 / effLev)
+            : price * (1 + slRoePct / 100 / effLev);
 
           try {
             if (existing && existing.side !== signal.action) {

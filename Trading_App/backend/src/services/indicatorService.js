@@ -153,6 +153,35 @@ export class IndicatorService {
     // 13. Trap Detection (Bull Trap, Bear Trap, Falling Knife)
     const traps = this.detectTraps(candles, currentBb, structure, volumeSurgeRatio);
 
+    // 14. Session VWAP (Volume-Weighted Average Price)
+    let cumPv = 0;
+    let cumVol = 0;
+    const vwapWindow = candles.slice(-48);
+    for (const c of vwapWindow) {
+      const typicalPrice = (c.high + c.low + c.close) / 3;
+      const vol = Math.max(0.0001, c.volume || 1);
+      cumPv += typicalPrice * vol;
+      cumVol += vol;
+    }
+    const vwapVal = cumVol > 0 ? cumPv / cumVol : closes[n - 1];
+    const distFromVwapPct = vwapVal > 0 ? Number((((closes[n - 1] - vwapVal) / vwapVal) * 100).toFixed(2)) : 0;
+
+    // 15. Momentum Velocity (ROC-5), Overextension (ATR distance from EMA21), & Candle Strength
+    const prev5Close = n > 5 ? closes[n - 6] : closes[0];
+    const roc5 = prev5Close > 0 ? Number((((closes[n - 1] - prev5Close) / prev5Close) * 100).toFixed(2)) : 0;
+    const atrDistFromEma21 = Number(((closes[n - 1] - ema21) / Math.max(currentAtr, closes[n - 1] * 0.001)).toFixed(2));
+    const currCandle = candles[n - 1];
+    const cRange = Math.max(1e-9, currCandle.high - currCandle.low);
+    const cBody = Math.abs(currCandle.close - currCandle.open);
+    const last3 = candles.slice(-3);
+    const candleStrength = {
+      isBullishCandle: currCandle.close > currCandle.open,
+      isBearishCandle: currCandle.close < currCandle.open,
+      bodyRatio: Number((cBody / cRange).toFixed(2)),
+      last3Bullish: last3.filter(c => c.close > c.open).length,
+      last3Bearish: last3.filter(c => c.close < c.open).length
+    };
+
     return {
       price: closes[n - 1],
       prevPrice: closes[n - 2],
@@ -193,6 +222,14 @@ export class IndicatorService {
       adx: adxData,
       atr: Number(currentAtr.toFixed(4)),
       atrPct,
+      vwap: {
+        value: Number(vwapVal.toFixed(4)),
+        priceAboveVwap: closes[n - 1] >= vwapVal,
+        distFromVwapPct
+      },
+      roc5,
+      atrDistFromEma21,
+      candleStrength,
       volume: {
         current: currentVolume,
         ma20: currentVolMa,

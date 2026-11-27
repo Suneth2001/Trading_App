@@ -620,6 +620,41 @@ export function MarketScannerPanel({
                   RSI: <strong>{coin.rsi}</strong>
                 </span>
 
+                {coin.adx !== undefined && (
+                  <span style={{
+                    background: '#131A29',
+                    padding: '2px 6px',
+                    borderRadius: '4px',
+                    color: coin.isChoppy ? '#F59E0B' : '#00D2FF'
+                  }}>
+                    ADX: <strong>{coin.adx}</strong> {coin.isChoppy ? '(Chop)' : ''}
+                  </span>
+                )}
+
+                {coin.entry5mConfirmed !== undefined && (
+                  <span style={{
+                    background: coin.entry5mConfirmed ? 'rgba(0, 245, 160, 0.14)' : '#131A29',
+                    border: `1px solid ${coin.entry5mConfirmed ? 'rgba(0, 245, 160, 0.35)' : 'transparent'}`,
+                    padding: '2px 6px',
+                    borderRadius: '4px',
+                    fontWeight: 700,
+                    color: coin.entry5mConfirmed ? '#00F5A0' : '#64748B'
+                  }}>
+                    {coin.entry5mConfirmed ? '✅ 5M Ready' : '⏳ 5M Wait'}
+                  </span>
+                )}
+
+                {coin.vwap !== undefined && (
+                  <span style={{
+                    background: '#131A29',
+                    padding: '2px 6px',
+                    borderRadius: '4px',
+                    color: coin.priceAboveVwap ? '#00F5A0' : '#FF3366'
+                  }}>
+                    {coin.priceAboveVwap ? '▲ VWAP' : '▼ VWAP'}
+                  </span>
+                )}
+
                 {coin.volumeSurgeRatio > 1.2 && (
                   <span style={{ background: '#131A29', padding: '2px 6px', borderRadius: '4px', color: '#00D2FF' }}>
                     Vol: <strong>{coin.volumeSurgeRatio}x</strong>

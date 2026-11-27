@@ -8,6 +8,7 @@ export class MarketAnalysisService {
     this.io = io;
     this.marginGuardian = marginGuardian;
     this.analysisCache = [];
+    this.btcMacroBias = { direction: 'NEUTRAL', isDumping: false, isPumping: false, changeScore: 0 };
     this.isAutoPilotRunning = false;
     this.autoPilotConfig = {
       minConfidence: 75,
@@ -45,7 +46,7 @@ export class MarketAnalysisService {
 
   startAutoPilot() {
     this.isAutoPilotRunning = true;
-    this.lastAutoTradeTime = 0; // Allow immediate execution on activation
+    this.lastAutoTradeTime = 0;
     if (this.io) {
       this.io.emit('autopilot_status', this.getAutoPilotStatus());
     }
@@ -65,9 +66,6 @@ export class MarketAnalysisService {
     return this.getAutoPilotStatus();
   }
 
-  /**
-   * Start recurring automated market scanner
-   */
   startScanner() {
     this.runFullScan();
     this.scanInterval = setInterval(() => {
@@ -76,25 +74,44 @@ export class MarketAnalysisService {
   }
 
   /**
-   * Analyze an individual cryptocurrency coin using Institutional Confluence Matrix
-   * (Multi-Timeframe 1H + 15M, RSI Divergence, Market Structure, S&R Pivots, and Trap Shield)
+   * Compute BTC Macro Regime first so altcoin setups don't fight BTC dumps/pumps
+   */
+  updateBtcMacroBias(btcInd1h, btcInd15m) {
+    if (!btcInd15m) return;
+    const is1hBull = btcInd1h ? (btcInd1h.supertrend.direction === 'BULLISH' && btcInd1h.price >= btcInd1h.ema.ema21) : true;
+    const is1hBear = btcInd1h ? (btcInd1h.supertrend.direction === 'BEARISH' && btcInd1h.price <= btcInd1h.ema.ema21) : false;
+    const isDumping = (btcInd15m.roc5 < -1.1 && btcInd15m.supertrend.direction === 'BEARISH') || Boolean(btcInd15m.traps?.isFallingKnife);
+    const isPumping = btcInd15m.roc5 > 1.1 && btcInd15m.supertrend.direction === 'BULLISH';
+
+    let direction = 'NEUTRAL';
+    if ((is1hBull && btcInd15m.supertrend.direction === 'BULLISH') || isPumping) direction = 'BULLISH';
+    else if ((is1hBear && btcInd15m.supertrend.direction === 'BEARISH') || isDumping) direction = 'BEARISH';
+
+    this.btcMacroBias = { direction, isDumping, isPumping };
+  }
+
+  /**
+   * 3-Timeframe (1H + 15M + 5M) Institutional Confluence Engine + VWAP + ADX Chop Shield
    */
   async analyzeCoin(pair) {
     const symbol = pair.symbol;
     const currentPrice = binanceService.getPrice(symbol);
     const tickerStats = binanceService.getTickerStats()[symbol] || {};
 
-    // 1. Fetch Multi-Timeframe Klines: 15m (Execution) & 1h (Macro Trend)
-    const [candles15m, candles1h] = await Promise.all([
+    const [candles15m, candles1h, candles5m] = await Promise.all([
       binanceService.fetchKlines(symbol, '15m', 80),
-      binanceService.fetchKlines(symbol, '1h', 60)
+      binanceService.fetchKlines(symbol, '1h', 60),
+      binanceService.fetchKlines(symbol, '5m', 50)
     ]);
 
     const ind15m = IndicatorService.calculateAll(candles15m);
     const ind1h = IndicatorService.calculateAll(candles1h);
+    const ind5m = IndicatorService.calculateAll(candles5m);
 
-    if (!ind15m || !currentPrice) {
-      return null;
+    if (!ind15m || !currentPrice) return null;
+
+    if (symbol === 'BTCUSDT') {
+      this.updateBtcMacroBias(ind1h, ind15m);
     }
 
     const {
@@ -109,30 +126,34 @@ export class MarketAnalysisService {
       divergence,
       structure,
       candlePatterns,
-      traps
+      traps,
+      vwap,
+      atrDistFromEma21
     } = ind15m;
 
-    const atr = ind15m.atr > 0 ? ind15m.atr : (currentPrice * 0.015);
+    const atr = ind15m.atr > 0 ? ind15m.atr : (currentPrice * 0.012);
+    const isChoppy = adx.adx < 18;
+    const priceAboveVwap = vwap ? vwap.priceAboveVwap : currentPrice >= ema.ema21;
 
-    // ================= 1. MULTI-TIMEFRAME (1H + 15M) TREND ANALYSIS ================= //
+    // 1. MULTI-TIMEFRAME 1H + 15M ALIGNMENT
     let htfTrend = 'NEUTRAL';
     let htfScoreBonus = 0;
 
     if (ind1h) {
-      const is1hBull = ind1h.supertrend.direction === 'BULLISH' && ind1h.price >= ind1h.ema.ema50;
-      const is1hBear = ind1h.supertrend.direction === 'BEARISH' && ind1h.price <= ind1h.ema.ema50;
+      const is1hBull = ind1h.supertrend.direction === 'BULLISH' && ind1h.price >= ind1h.ema.ema21;
+      const is1hBear = ind1h.supertrend.direction === 'BEARISH' && ind1h.price <= ind1h.ema.ema21;
       if (is1hBull) {
         htfTrend = 'BULLISH';
         htfScoreBonus = 10;
       } else if (is1hBear) {
         htfTrend = 'BEARISH';
         htfScoreBonus = -10;
-      } else if (ind1h.price > ind1h.ema.ema21) {
+      } else if (ind1h.price > ind1h.ema.ema50) {
         htfTrend = 'MILD_BULLISH';
-        htfScoreBonus = 5;
-      } else if (ind1h.price < ind1h.ema.ema21) {
+        htfScoreBonus = 4;
+      } else if (ind1h.price < ind1h.ema.ema50) {
         htfTrend = 'MILD_BEARISH';
-        htfScoreBonus = -5;
+        htfScoreBonus = -4;
       }
     }
 
@@ -150,158 +171,159 @@ export class MarketAnalysisService {
       mtfSummary = '1H: Bearish 🔴 | 15M: Bounce 🟢 (Counter-Trend Risk)';
     } else if (htfTrend.includes('BULLISH') && supertrend.direction === 'BEARISH') {
       mtfStatus = 'COUNTER_TREND_PULLBACK';
-      mtfSummary = '1H: Bullish 🟢 | 15M: Pullback 🔴 (Dip Buying Zone)';
+      mtfSummary = '1H: Bullish 🟢 | 15M: Pullback 🔴 (Counter-Trend Risk)';
     }
 
-    // ================= 2. 4-PILLAR CONFLUENCE SCORING ENGINE ================= //
+    // 2. PRECISION 5M ENTRY TIMING CONFIRMATION
+    const is5mBullConfirmed = ind5m
+      ? (ind5m.ema.ema9 >= ind5m.ema.ema21 &&
+         ind5m.macd.histogram >= ind5m.macd.prevHistogram &&
+         ind5m.rsi >= 42 && ind5m.rsi <= 71 &&
+         ind5m.candleStrength?.isBullishCandle)
+      : false;
 
-    // --- LONG PILLARS (0 to 25 pts each) ---
-    // Pillar 1: Trend
-    let longPillarTrend = 8;
+    const is5mBearConfirmed = ind5m
+      ? (ind5m.ema.ema9 <= ind5m.ema.ema21 &&
+         ind5m.macd.histogram <= ind5m.macd.prevHistogram &&
+         ind5m.rsi <= 58 && ind5m.rsi >= 29 &&
+         ind5m.candleStrength?.isBearishCandle)
+      : false;
+
+    // 3. ANTI-CHASE & BTC MACRO FILTER
+    const longOverextended = atrDistFromEma21 > 1.8 || rsi > 71 || structure.distToResistancePct < 0.4;
+    const shortOverextended = atrDistFromEma21 < -1.8 || rsi < 29 || structure.distToSupportPct < 0.4;
+    const longBtcAligned = !this.btcMacroBias.isDumping && this.btcMacroBias.direction !== 'BEARISH';
+    const shortBtcAligned = !this.btcMacroBias.isPumping && this.btcMacroBias.direction !== 'BULLISH';
+
+    // 4. RECALIBRATED 4-PILLAR CONFLUENCE MATRIX (Base 5/pillar = 20, strictly rewards real confluence)
+    // --- LONG PILLARS ---
+    let longPillarTrend = 5;
     if (htfScoreBonus > 0) longPillarTrend += 7;
     if (supertrend.direction === 'BULLISH') longPillarTrend += 5;
     if (ema.bullishAlignment || ema.goldenCross) longPillarTrend += 4;
-    if (ema.priceAboveEma200) longPillarTrend += 2;
-    if (adx.isTrending && adx.trendDirection === 'BULLISH') longPillarTrend += 2;
-    longPillarTrend = Math.min(25, Math.max(5, longPillarTrend));
+    if (priceAboveVwap) longPillarTrend += 4;
+    if (adx.isTrending && adx.trendDirection === 'BULLISH') longPillarTrend += 3;
+    if (isChoppy) longPillarTrend -= 5;
+    longPillarTrend = Math.min(25, Math.max(3, longPillarTrend));
 
-    // Pillar 2: Structure & Key Levels
-    let longPillarStructure = 10;
-    if (structure.isTestingSupport) longPillarStructure += 9;
+    let longPillarStructure = 5;
+    if (structure.isTestingSupport) longPillarStructure += 7;
     if (candlePatterns.some(p => p.type === 'BULLISH')) longPillarStructure += 6;
-    if (structure.status === 'BREAKOUT_RESISTANCE') longPillarStructure += 7;
+    if (structure.status === 'BREAKOUT_RESISTANCE') longPillarStructure += 6;
     if (structure.distToResistancePct >= 1.2) longPillarStructure += 5;
-    if (structure.isTestingResistance && structure.status !== 'BREAKOUT_RESISTANCE') longPillarStructure -= 4;
-    longPillarStructure = Math.min(25, Math.max(5, longPillarStructure));
+    if (longOverextended) longPillarStructure -= 7;
+    longPillarStructure = Math.min(25, Math.max(3, longPillarStructure));
 
-    // Pillar 3: Momentum & Divergence
-    let longPillarMomentum = 9;
-    if (divergence.detected && divergence.type.startsWith('BULLISH')) longPillarMomentum += 11;
-    if (stochRsi.isBullishCross || stochRsi.k > stochRsi.d) longPillarMomentum += 5;
-    if (macd.crossover === 'BULLISH' || macd.isExpandingBullish || macd.histogram > 0) longPillarMomentum += 5;
-    if (rsi >= 42 && rsi <= 68) longPillarMomentum += 4;
-    if (rsi < 35) longPillarMomentum += 6;
-    if (rsi > 76) longPillarMomentum -= 6;
-    longPillarMomentum = Math.min(25, Math.max(5, longPillarMomentum));
+    let longPillarMomentum = 5;
+    if (is5mBullConfirmed) longPillarMomentum += 7;
+    if (divergence.detected && divergence.type.startsWith('BULLISH')) longPillarMomentum += 7;
+    if (stochRsi.isBullishCross || stochRsi.k > stochRsi.d) longPillarMomentum += 4;
+    if (macd.crossover === 'BULLISH' || macd.isExpandingBullish || macd.histogram > 0) longPillarMomentum += 4;
+    if (rsi >= 42 && rsi <= 65) longPillarMomentum += 4;
+    else if (rsi > 71) longPillarMomentum -= 6;
+    longPillarMomentum = Math.min(25, Math.max(3, longPillarMomentum));
 
-    // Pillar 4: Volume & Volatility
-    let longPillarVolume = 10;
+    let longPillarVolume = 5;
     if (volume.isHighVolume && ind15m.price >= ind15m.prevPrice) longPillarVolume += 7;
     if (volume.obv.isAccumulation) longPillarVolume += 5;
     if (bollinger.isSqueeze) longPillarVolume += 4;
     if (volume.surgeRatio > 1.15) longPillarVolume += 3;
-    longPillarVolume = Math.min(25, Math.max(5, longPillarVolume));
+    if (longBtcAligned) longPillarVolume += 4;
+    else if (this.btcMacroBias.isDumping) longPillarVolume -= 10;
+    longPillarVolume = Math.min(25, Math.max(3, longPillarVolume));
 
     let longRawScore = longPillarTrend + longPillarStructure + longPillarMomentum + longPillarVolume;
 
-    // --- SHORT PILLARS (0 to 25 pts each) ---
-    // Pillar 1: Trend
-    let shortPillarTrend = 8;
+    // --- SHORT PILLARS ---
+    let shortPillarTrend = 5;
     if (htfScoreBonus < 0) shortPillarTrend += 7;
     if (supertrend.direction === 'BEARISH') shortPillarTrend += 5;
     if (ema.bearishAlignment || ema.deathCross) shortPillarTrend += 4;
-    if (!ema.priceAboveEma200) shortPillarTrend += 2;
-    if (adx.isTrending && adx.trendDirection === 'BEARISH') shortPillarTrend += 2;
-    shortPillarTrend = Math.min(25, Math.max(5, shortPillarTrend));
+    if (!priceAboveVwap) shortPillarTrend += 4;
+    if (adx.isTrending && adx.trendDirection === 'BEARISH') shortPillarTrend += 3;
+    if (isChoppy) shortPillarTrend -= 5;
+    shortPillarTrend = Math.min(25, Math.max(3, shortPillarTrend));
 
-    // Pillar 2: Structure & Key Levels
-    let shortPillarStructure = 10;
-    if (structure.isTestingResistance) shortPillarStructure += 9;
+    let shortPillarStructure = 5;
+    if (structure.isTestingResistance) shortPillarStructure += 7;
     if (candlePatterns.some(p => p.type === 'BEARISH')) shortPillarStructure += 6;
-    if (structure.status === 'BREAKDOWN_SUPPORT') shortPillarStructure += 7;
+    if (structure.status === 'BREAKDOWN_SUPPORT') shortPillarStructure += 6;
     if (structure.distToSupportPct >= 1.2) shortPillarStructure += 5;
-    if (structure.isTestingSupport && structure.status !== 'BREAKDOWN_SUPPORT') shortPillarStructure -= 4;
-    shortPillarStructure = Math.min(25, Math.max(5, shortPillarStructure));
+    if (shortOverextended) shortPillarStructure -= 7;
+    shortPillarStructure = Math.min(25, Math.max(3, shortPillarStructure));
 
-    // Pillar 3: Momentum & Divergence
-    let shortPillarMomentum = 9;
-    if (divergence.detected && divergence.type.startsWith('BEARISH')) shortPillarMomentum += 11;
-    if (stochRsi.isBearishCross || stochRsi.k < stochRsi.d) shortPillarMomentum += 5;
-    if (macd.crossover === 'BEARISH' || macd.isContractingBearish || macd.histogram < 0) shortPillarMomentum += 5;
-    if (rsi >= 32 && rsi <= 58) shortPillarMomentum += 4;
-    if (rsi > 65) shortPillarMomentum += 6;
-    if (rsi < 24) shortPillarMomentum -= 6;
-    shortPillarMomentum = Math.min(25, Math.max(5, shortPillarMomentum));
+    let shortPillarMomentum = 5;
+    if (is5mBearConfirmed) shortPillarMomentum += 7;
+    if (divergence.detected && divergence.type.startsWith('BEARISH')) shortPillarMomentum += 7;
+    if (stochRsi.isBearishCross || stochRsi.k < stochRsi.d) shortPillarMomentum += 4;
+    if (macd.crossover === 'BEARISH' || macd.isContractingBearish || macd.histogram < 0) shortPillarMomentum += 4;
+    if (rsi >= 35 && rsi <= 58) shortPillarMomentum += 4;
+    else if (rsi < 29) shortPillarMomentum -= 6;
+    shortPillarMomentum = Math.min(25, Math.max(3, shortPillarMomentum));
 
-    // Pillar 4: Volume & Volatility
-    let shortPillarVolume = 10;
+    let shortPillarVolume = 5;
     if (volume.isHighVolume && ind15m.price <= ind15m.prevPrice) shortPillarVolume += 7;
     if (!volume.obv.isAccumulation) shortPillarVolume += 5;
     if (bollinger.isSqueeze) shortPillarVolume += 4;
     if (volume.surgeRatio > 1.15) shortPillarVolume += 3;
-    shortPillarVolume = Math.min(25, Math.max(5, shortPillarVolume));
+    if (shortBtcAligned) shortPillarVolume += 4;
+    else if (this.btcMacroBias.isPumping) shortPillarVolume -= 10;
+    shortPillarVolume = Math.min(25, Math.max(3, shortPillarVolume));
 
     let shortRawScore = shortPillarTrend + shortPillarStructure + shortPillarMomentum + shortPillarVolume;
 
-    // ================= 3. TRAP SHIELD & PROTECTION FILTERS ================= //
-    let trapWarning = traps.alert;
-
+    // 5. TRAP SHIELD ADJUSTMENTS
+    const trapWarning = traps.alert;
     if (traps.isBullTrap) {
       longRawScore = Math.max(15, longRawScore - 25);
-      shortRawScore = Math.min(95, shortRawScore + 12);
+      shortRawScore = Math.min(95, shortRawScore + 10);
     }
     if (traps.isBearTrap) {
       shortRawScore = Math.max(15, shortRawScore - 25);
-      longRawScore = Math.min(95, longRawScore + 12);
+      longRawScore = Math.min(95, longRawScore + 10);
     }
     if (traps.isFallingKnife) {
-      // NEVER allow falling knife to trigger a Strong Long
-      longRawScore = Math.min(48, longRawScore);
-      shortRawScore = Math.min(95, shortRawScore + 15);
+      longRawScore = Math.min(42, longRawScore);
+      shortRawScore = Math.min(95, shortRawScore + 12);
     }
 
     const longScore = Math.min(98, Math.max(15, Math.round(longRawScore)));
     const shortScore = Math.min(98, Math.max(15, Math.round(shortRawScore)));
 
-    // ================= 4. STRUCTURAL TARGETS (TP1, TP2, SL) ================= //
-    // Long Targets
-    const longSlDist = Math.max(
-      currentPrice * 0.015,
-      Math.min(currentPrice * 0.045, Math.abs(currentPrice - structure.support) + (0.5 * atr))
-    );
-    const longSlPrice = Number((currentPrice - longSlDist).toFixed(pair.precision));
-    const longTp1Dist = Math.max(longSlDist * 1.6, Math.max(currentPrice * 0.025, 1.8 * atr));
-    const longTp1Price = Number((currentPrice + longTp1Dist).toFixed(pair.precision));
-    const longTp2Dist = longSlDist * 2.8;
-    const longTp2Price = Number((currentPrice + longTp2Dist).toFixed(pair.precision));
-    const longRr = (longTp1Dist / longSlDist).toFixed(1);
-
-    // Short Targets
-    const shortSlDist = Math.max(
-      currentPrice * 0.015,
-      Math.min(currentPrice * 0.045, Math.abs(structure.resistance - currentPrice) + (0.5 * atr))
-    );
-    const shortSlPrice = Number((currentPrice + shortSlDist).toFixed(pair.precision));
-    const shortTp1Dist = Math.max(shortSlDist * 1.6, Math.max(currentPrice * 0.025, 1.8 * atr));
-    const shortTp1Price = Number((currentPrice - shortTp1Dist).toFixed(pair.precision));
-    const shortTp2Dist = shortSlDist * 2.8;
-    const shortTp2Price = Number((currentPrice - shortTp2Dist).toFixed(pair.precision));
-    const shortRr = (shortTp1Dist / shortSlDist).toFixed(1);
-
-    // Recommended Leverage based on volatility
+    // 6. REALISTIC LEVERAGED TARGETS (e.g. at 10x: SL ~ 4.2-6.0% ROE, TP1 ~ 8.8-13.0% ROE)
     let recLeverage = 10;
-    if (currentPrice > 1000) recLeverage = 15; // BTC/ETH
-    else if (ind15m.atrPct > 3.0) recLeverage = 5; // Highly volatile
-    else if (bollinger.isSqueeze) recLeverage = 8;
-    else if (currentPrice < 1) recLeverage = 5; // Meme / micro altcoins
+    if (currentPrice > 1000) recLeverage = 12;
+    else if (ind15m.atrPct > 3.0) recLeverage = 6;
+    else if (bollinger.isSqueeze) recLeverage = 10;
+    else if (currentPrice < 1) recLeverage = 10;
 
-    // Long Setup Object
-    const longRating = longScore >= 78 ? 'STRONG BUY' : longScore >= 58 ? 'BUY' : 'NEUTRAL';
+    const lev = Math.max(1, Number(this.autoPilotConfig.leverage || recLeverage));
+    const minSlPricePct = 0.042 / lev; // ~4.2% ROE
+    const maxSlPricePct = 0.062 / lev; // ~6.2% ROE
+    const rawAtrPricePct = Math.max(0.003, (atr / currentPrice) * 0.9);
+    const slPricePct = Math.min(maxSlPricePct, Math.max(minSlPricePct, rawAtrPricePct));
+    const slDist = currentPrice * slPricePct;
+    const tp1Dist = slDist * 2.1; // +8.8% to +13.0% ROE (realistic 1:2.1 R:R!)
+    const tp2Dist = slDist * 3.2; // +13.4% to +19.8% ROE runner
+
+    const longSlPrice = Number((currentPrice - slDist).toFixed(pair.precision));
+    const longTp1Price = Number((currentPrice + tp1Dist).toFixed(pair.precision));
+    const longTp2Price = Number((currentPrice + tp2Dist).toFixed(pair.precision));
     const longSetup = {
       action: 'LONG',
-      rating: longRating,
+      rating: longScore >= 78 ? 'STRONG BUY' : longScore >= 60 ? 'BUY' : 'NEUTRAL',
       score: longScore,
       confidence: longScore,
       entryPrice: currentPrice,
       tpPrice: longTp1Price,
       tp2Price: longTp2Price,
       slPrice: longSlPrice,
-      tpPct: Number(((longTp1Dist / currentPrice) * 100).toFixed(2)),
-      tp2Pct: Number(((longTp2Dist / currentPrice) * 100).toFixed(2)),
-      slPct: Number(((longSlDist / currentPrice) * 100).toFixed(2)),
+      tpPct: Number(((tp1Dist / currentPrice) * 100).toFixed(2)),
+      tp2Pct: Number(((tp2Dist / currentPrice) * 100).toFixed(2)),
+      slPct: Number(((slDist / currentPrice) * 100).toFixed(2)),
       recommendedLeverage: recLeverage,
-      riskRewardRatio: `1:${longRr}`,
-      winRateProbability: Math.min(94, Math.max(50, Math.round(longScore * 0.95))),
+      riskRewardRatio: '1:2.1',
+      winRateProbability: Math.min(93, Math.max(48, Math.round(longScore * 0.94))),
       confluenceBreakdown: {
         trend: longPillarTrend,
         structure: longPillarStructure,
@@ -311,23 +333,24 @@ export class MarketAnalysisService {
       }
     };
 
-    // Short Setup Object
-    const shortRating = shortScore >= 78 ? 'STRONG SELL' : shortScore >= 58 ? 'SELL' : 'NEUTRAL';
+    const shortSlPrice = Number((currentPrice + slDist).toFixed(pair.precision));
+    const shortTp1Price = Number((currentPrice - tp1Dist).toFixed(pair.precision));
+    const shortTp2Price = Number((currentPrice - tp2Dist).toFixed(pair.precision));
     const shortSetup = {
       action: 'SHORT',
-      rating: shortRating,
+      rating: shortScore >= 78 ? 'STRONG SELL' : shortScore >= 60 ? 'SELL' : 'NEUTRAL',
       score: shortScore,
       confidence: shortScore,
       entryPrice: currentPrice,
       tpPrice: shortTp1Price,
       tp2Price: shortTp2Price,
       slPrice: shortSlPrice,
-      tpPct: Number(((shortTp1Dist / currentPrice) * 100).toFixed(2)),
-      tp2Pct: Number(((shortTp2Dist / currentPrice) * 100).toFixed(2)),
-      slPct: Number(((shortSlDist / currentPrice) * 100).toFixed(2)),
+      tpPct: Number(((tp1Dist / currentPrice) * 100).toFixed(2)),
+      tp2Pct: Number(((tp2Dist / currentPrice) * 100).toFixed(2)),
+      slPct: Number(((slDist / currentPrice) * 100).toFixed(2)),
       recommendedLeverage: recLeverage,
-      riskRewardRatio: `1:${shortRr}`,
-      winRateProbability: Math.min(94, Math.max(50, Math.round(shortScore * 0.95))),
+      riskRewardRatio: '1:2.1',
+      winRateProbability: Math.min(93, Math.max(48, Math.round(shortScore * 0.94))),
       confluenceBreakdown: {
         trend: shortPillarTrend,
         structure: shortPillarStructure,
@@ -337,34 +360,27 @@ export class MarketAnalysisService {
       }
     };
 
-    // Dominant Direction Selection
     const isDominantLong = longScore >= shortScore;
     const dominantSetup = isDominantLong ? longSetup : shortSetup;
     const dominantAction = isDominantLong ? 'LONG' : 'SHORT';
-    const dominantScore = dominantSetup.score;
-    const dominantRating = dominantSetup.rating;
-    const dominantConfidence = dominantSetup.confidence;
-    const dominantTpPrice = dominantSetup.tpPrice;
-    const dominantTp2Price = dominantSetup.tp2Price;
-    const dominantSlPrice = dominantSetup.slPrice;
-    const dominantRr = dominantSetup.riskRewardRatio;
+    const entry5mConfirmed = isDominantLong ? is5mBullConfirmed : is5mBearConfirmed;
+    const isOverextended = isDominantLong ? longOverextended : shortOverextended;
+    const btcAligned = isDominantLong ? longBtcAligned : shortBtcAligned;
 
-    // Build Highlights / Catalysts
     const highlights = [];
     if (divergence.detected) highlights.push(`⚡ ${divergence.label}`);
     if (mtfStatus.startsWith('ALIGNED')) highlights.push(`🏆 ${mtfSummary}`);
-    if (traps.alert) highlights.push(`⚠️ ${traps.alert}`);
+    if (entry5mConfirmed) highlights.push('🎯 5M Precision Entry Trigger Confirmed');
+    if (isChoppy) highlights.push(`⚠️ Choppy / Sideways Market (ADX ${adx.adx})`);
+    if (trapWarning) highlights.push(`⚠️ ${trapWarning}`);
     if (structure.status === 'BREAKOUT_RESISTANCE') highlights.push('🚀 Breakout Above Key Resistance');
-    if (structure.isTestingSupport) highlights.push(`🛡️ Bounce Off Support ($${structure.support})`);
     if (candlePatterns.length > 0) highlights.push(`🕯️ ${candlePatterns.map(p => p.name).join(', ')}`);
-    if (bollinger.isSqueeze) highlights.push('⚡ Bollinger Band Squeeze (Breakout Imminent)');
+    if (bollinger.isSqueeze) highlights.push('⚡ Bollinger Band Squeeze');
     if (volume.isHighVolume) highlights.push(`📊 Volume Surge (${volume.surgeRatio}x)`);
-    if (supertrend.direction === 'BULLISH') highlights.push('🟢 SuperTrend Bullish Support');
-    if (supertrend.direction === 'BEARISH') highlights.push('🔴 SuperTrend Bearish Resistance');
 
     const invalidationRule = isDominantLong
-      ? `Invalidated if candle closes below structural support ($${structure.support})`
-      : `Invalidated if candle closes above structural resistance ($${structure.resistance})`;
+      ? `Invalidated below support ($${structure.support})`
+      : `Invalidated above resistance ($${structure.resistance})`;
 
     return {
       symbol,
@@ -376,10 +392,10 @@ export class MarketAnalysisService {
       high24h: tickerStats.highPrice || currentPrice * 1.02,
       low24h: tickerStats.lowPrice || currentPrice * 0.98,
       volume24h: tickerStats.volume || 100000,
-      score: dominantScore,
-      rating: dominantRating,
+      score: dominantSetup.score,
+      rating: dominantSetup.rating,
       action: dominantAction,
-      confidence: dominantConfidence,
+      confidence: dominantSetup.confidence,
       trend: isDominantLong ? 'BULLISH ADVANCE' : 'BEARISH DISTRIBUTION',
       mtfStatus,
       mtfSummary,
@@ -397,6 +413,14 @@ export class MarketAnalysisService {
       isFallingKnife: traps.isFallingKnife,
       candlePatterns: candlePatterns.map(p => p.name),
       rsi,
+      adx: adx.adx,
+      vwap: vwap?.value || currentPrice,
+      priceAboveVwap,
+      atrDistFromEma21,
+      entry5mConfirmed,
+      btcAligned,
+      isChoppy,
+      isOverextended,
       stochRsiK: stochRsi.k,
       stochRsiD: stochRsi.d,
       macdHistogram: macd.histogram,
@@ -404,11 +428,14 @@ export class MarketAnalysisService {
       isSqueeze: bollinger.isSqueeze,
       volumeSurgeRatio: volume.surgeRatio,
       entryPrice: currentPrice,
-      tpPrice: dominantTpPrice,
-      tp2Price: dominantTp2Price,
-      slPrice: dominantSlPrice,
+      tpPrice: dominantSetup.tpPrice,
+      tp2Price: dominantSetup.tp2Price,
+      slPrice: dominantSetup.slPrice,
+      tpPct: dominantSetup.tpPct,
+      tp2Pct: dominantSetup.tp2Pct,
+      slPct: dominantSetup.slPct,
       recommendedLeverage: recLeverage,
-      riskRewardRatio: dominantRr,
+      riskRewardRatio: dominantSetup.riskRewardRatio,
       winRateProbability: dominantSetup.winRateProbability,
       invalidationRule,
       highlights,
@@ -417,28 +444,26 @@ export class MarketAnalysisService {
     };
   }
 
-  /**
-   * Run full market scan across all configured cryptocurrency pairs
-   */
   async runFullScan() {
     try {
       const results = [];
       for (const pair of CONFIG.DEFAULT_PAIRS) {
         const analysis = await this.analyzeCoin(pair);
-        if (analysis) {
-          results.push(analysis);
-        }
+        if (analysis) results.push(analysis);
       }
 
-      // Sort by best trade opportunity (deviation from 50)
-      results.sort((a, b) => Math.abs(b.score - 50) - Math.abs(a.score - 50));
+      results.sort((a, b) => {
+        const aReady = (a.entry5mConfirmed && a.mtfStatus?.startsWith('ALIGNED') && !a.isChoppy) ? 1 : 0;
+        const bReady = (b.entry5mConfirmed && b.mtfStatus?.startsWith('ALIGNED') && !b.isChoppy) ? 1 : 0;
+        if (aReady !== bReady) return bReady - aReady;
+        return b.confidence - a.confidence;
+      });
       this.analysisCache = results;
 
       if (this.io) {
         this.io.emit('market_analysis_update', results);
       }
 
-      // Evaluate AI Auto-Pilot if enabled
       if (this.isAutoPilotRunning) {
         await this.evaluateAutoPilot(results);
       }
@@ -451,7 +476,7 @@ export class MarketAnalysisService {
   }
 
   /**
-   * Auto-Pilot: Automatically trades the highest-ranking opportunities with dynamic TP / SL
+   * Auto-Pilot: Strict 6-Gate Institutional Quality Filter before opening any trade
    */
   async evaluateAutoPilot(rankedCoins) {
     if (this.isEvaluatingAutoPilot) return;
@@ -459,12 +484,10 @@ export class MarketAnalysisService {
 
     try {
       const now = Date.now();
-      // Cooldown: at least 20 seconds between auto trades
-      if (now - this.lastAutoTradeTime < 20000) return;
+      // 45s cooldown prevents spraying correlated altcoin entries simultaneously
+      if (now - this.lastAutoTradeTime < 45000) return;
 
       const isLive = Boolean(paperTrading.isLive && binanceService.liveExchange);
-
-      // Check open positions count
       const currentPositions = isLive ? await binanceService.getLivePositions() : paperTrading.positions;
       if (currentPositions.length >= this.autoPilotConfig.maxOpenTrades) return;
 
@@ -485,14 +508,10 @@ export class MarketAnalysisService {
           return;
         }
 
-        // Leave ~15% buffer for fees/maintenance margin so Binance won't reject with -2019
         const maxSafeMargin = Number((availableMargin * 0.85).toFixed(2));
         effectiveAllocation = Math.max(0.28, Math.min(effectiveAllocation, maxSafeMargin));
-        if (effectiveAllocation > availableMargin * 0.92) {
-          effectiveAllocation = maxSafeMargin;
-        }
+        if (effectiveAllocation > availableMargin * 0.92) effectiveAllocation = maxSafeMargin;
 
-        // Unconditionally ensure Binance Futures $5.50+ min notional is satisfied
         if (effectiveAllocation * effectiveLeverage < 5.6) {
           effectiveLeverage = Math.min(20, Math.max(effectiveLeverage, Math.ceil(6.0 / Math.max(0.28, effectiveAllocation))));
         }
@@ -513,32 +532,41 @@ export class MarketAnalysisService {
       }
 
       for (const coin of rankedCoins) {
+        // GATE 1: High Confluence Threshold
         if (coin.confidence < this.autoPilotConfig.minConfidence) continue;
         if (coin.action === 'HOLD') continue;
 
-        // Filter by direction preference
+        // GATE 2: Direction Filter
         if (coin.action === 'LONG' && this.autoPilotConfig.directionPreference === 'SHORT_ONLY') continue;
         if (coin.action === 'SHORT' && this.autoPilotConfig.directionPreference === 'LONG_ONLY') continue;
 
-        // In Live mode, skip high-minNotional pairs (BTC/ETH/LINK) if position notional < pair's minNotional
-        if (isLive) {
-          const pairInfo = CONFIG.DEFAULT_PAIRS.find(p => p.symbol === coin.symbol);
-          const minNotional = pairInfo?.minNotional || 5.5;
-          const minCoinCost = (pairInfo?.minQty || 0.001) * coin.price;
-          const requiredNotional = Math.max(minNotional, minCoinCost);
-          if (effectiveAllocation * effectiveLeverage < requiredNotional * 0.98) {
-            continue; // Automatically pick the next high-confidence affordable pair (e.g. DOGE, XRP, ADA, SUI, SOL, NEAR)
-          }
-        }
+        // GATE 3: Mandatory 1H + 15M MTF Alignment (NEVER trade counter-trend!)
+        if (coin.action === 'LONG' && coin.mtfStatus !== 'ALIGNED_BULLISH') continue;
+        if (coin.action === 'SHORT' && coin.mtfStatus !== 'ALIGNED_BEARISH') continue;
 
-        // Protection: Skip coins experiencing falling knife capitulation or severe trap warnings
+        // GATE 4: Sideways Chop Shield + 5M Entry Confirmation + Anti-Chase
+        if (coin.isChoppy) continue;
+        if (!coin.entry5mConfirmed) continue;
+        if (coin.isOverextended) continue;
+        if (coin.action === 'LONG' && coin.rsi > 69) continue;
+        if (coin.action === 'SHORT' && coin.rsi < 31) continue;
+
+        // GATE 5: BTC Macro Alignment & Trap Shield
+        if (coin.btcAligned === false) continue;
         if (coin.isFallingKnife) continue;
         if (coin.action === 'LONG' && coin.trapWarning?.includes('BULL TRAP')) continue;
         if (coin.action === 'SHORT' && coin.trapWarning?.includes('BEAR TRAP')) continue;
 
-        // Don't open if already in position for this coin
-        const alreadyOpen = currentPositions.some(p => p.symbol === coin.symbol);
-        if (alreadyOpen) continue;
+        // GATE 6: Affordability & Duplicate Pair Check
+        if (isLive) {
+          const pairInfo = CONFIG.DEFAULT_PAIRS.find(p => p.symbol === coin.symbol);
+          const minNotional = pairInfo?.minNotional || 5.5;
+          const minCoinCost = (pairInfo?.minQty || 0.001) * coin.price;
+          if (effectiveAllocation * effectiveLeverage < Math.max(minNotional, minCoinCost) * 0.98) {
+            continue;
+          }
+        }
+        if (currentPositions.some(p => p.symbol === coin.symbol)) continue;
 
         try {
           let pos = null;
@@ -563,15 +591,15 @@ export class MarketAnalysisService {
               margin: effectiveAllocation,
               tp: coin.tpPrice,
               sl: coin.slPrice,
-              trailingStopPct: 2.0,
+              trailingStopPct: this.marginGuardian?.trailingStopPct || 1.5,
               source: 'BINANCE_LIVE_AUTOPILOT',
               binanceOrderId: liveOrder?.id || null,
               openedAt: new Date().toISOString()
             };
 
             if (this.marginGuardian) {
-              this.marginGuardian.setTarget(posId, { tp: coin.tpPrice, sl: coin.slPrice, trailingStopPct: 2.0 });
-              this.marginGuardian.setTarget(cleanSym, { tp: coin.tpPrice, sl: coin.slPrice, trailingStopPct: 2.0 });
+              this.marginGuardian.setTarget(posId, { tp: coin.tpPrice, sl: coin.slPrice, trailingStopPct: this.marginGuardian.trailingStopPct || 1.5 });
+              this.marginGuardian.setTarget(cleanSym, { tp: coin.tpPrice, sl: coin.slPrice, trailingStopPct: this.marginGuardian.trailingStopPct || 1.5 });
             }
           } else {
             pos = paperTrading.openPosition({
@@ -582,13 +610,13 @@ export class MarketAnalysisService {
               markPrice: coin.price,
               tp: coin.tpPrice,
               sl: coin.slPrice,
-              trailingStopPct: 2.0,
+              trailingStopPct: this.marginGuardian?.trailingStopPct || 1.5,
               source: 'AI_AUTO_PILOT'
             });
 
             if (this.marginGuardian) {
-              this.marginGuardian.setTarget(pos.id, { tp: coin.tpPrice, sl: coin.slPrice, trailingStopPct: 2.0 });
-              this.marginGuardian.setTarget(coin.symbol, { tp: coin.tpPrice, sl: coin.slPrice, trailingStopPct: 2.0 });
+              this.marginGuardian.setTarget(pos.id, { tp: coin.tpPrice, sl: coin.slPrice, trailingStopPct: this.marginGuardian.trailingStopPct || 1.5 });
+              this.marginGuardian.setTarget(coin.symbol, { tp: coin.tpPrice, sl: coin.slPrice, trailingStopPct: this.marginGuardian.trailingStopPct || 1.5 });
             }
           }
 
@@ -597,7 +625,7 @@ export class MarketAnalysisService {
           const tradeAlert = {
             id: `AP-${Date.now()}`,
             timestamp: new Date().toISOString(),
-            message: `🤖 AI Auto-Pilot opened ${coin.action} on ${coin.symbol} @ $${coin.price} ($${effectiveAllocation} Margin, ${effectiveLeverage}x, Conf: ${coin.confidence}%) [${isLive ? 'LIVE BINANCE' : 'DEMO'}]`,
+            message: `🤖 AI Auto-Pilot opened ${coin.action} ${coin.symbol} @ $${coin.price} | TP: $${coin.tpPrice} (+${coin.tpPct}%) | SL: $${coin.slPrice} (-${coin.slPct}%) | 3-TF + 5M Ready (Conf: ${coin.confidence}%, ADX ${coin.adx}) [${isLive ? 'LIVE' : 'DEMO'}]`,
             position: pos
           };
 
@@ -618,7 +646,7 @@ export class MarketAnalysisService {
           if (this.onTradeCallback) {
             try { await this.onTradeCallback(); } catch {}
           }
-          break; // open 1 trade per cycle
+          break;
         } catch (err) {
           console.warn('[MarketAnalysisService] Auto-Pilot open error:', err.message);
           if (now - this.lastAutoPilotErrorTime > 15000 && this.io) {
@@ -638,5 +666,13 @@ export class MarketAnalysisService {
 
   getLatestAnalysis() {
     return this.analysisCache;
+  }
+
+  getLatestAnalysisMap() {
+    const map = {};
+    for (const item of this.analysisCache || []) {
+      map[item.symbol] = item;
+    }
+    return map;
   }
 }

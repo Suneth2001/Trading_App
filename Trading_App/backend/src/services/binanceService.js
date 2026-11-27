@@ -336,11 +336,16 @@ export class BinanceService {
 
     const rawPrice = this.getPrice(cleanSym);
     const price = cleanSym === 'PEPEUSDT' ? rawPrice * 1000 : rawPrice;
-    const notional = Math.max(pairInfo.minNotional || 5.5, amountUsdt * leverage);
-    const rawQty = notional / price;
+    const minNotional = pairInfo.minNotional || 5.5;
+    const minQty = pairInfo.minQty || 0.001;
+    const targetNotional = Math.max(minNotional, amountUsdt * leverage);
+    const rawQty = targetNotional / price;
     const decimals = pairInfo.stepDecimals !== undefined ? pairInfo.stepDecimals : 2;
     const factor = Math.pow(10, decimals);
-    const quantity = Math.max(pairInfo.minQty || 0.001, Math.ceil(rawQty * factor) / factor);
+    const floored = Math.floor(rawQty * factor) / factor;
+    const ceiled = Math.ceil(rawQty * factor) / factor;
+    const minReqQty = Math.max(minQty, Math.ceil((minNotional / price) * factor) / factor);
+    const quantity = (floored >= minReqQty && floored * price >= minNotional) ? floored : Math.max(minReqQty, ceiled);
     const fixedQty = Number(quantity.toFixed(decimals));
     const orderSide = side === 'LONG' ? 'buy' : 'sell';
 
@@ -456,7 +461,7 @@ export class BinanceService {
     const normInterval = (interval || '15m').toLowerCase();
     const cacheKey = `${symbol}-${normInterval}`;
     const now = Date.now();
-    const ttl = (normInterval === '1h' || normInterval === '4h') ? 25000 : 3500;
+    const ttl = (normInterval === '1h' || normInterval === '4h') ? 45000 : 8000;
 
     if (this.candlesCache[cacheKey] && this.candlesCacheTime?.[cacheKey] && (now - this.candlesCacheTime[cacheKey] < ttl)) {
       return this.candlesCache[cacheKey];
