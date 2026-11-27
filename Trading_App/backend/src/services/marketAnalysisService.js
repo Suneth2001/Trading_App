@@ -18,6 +18,9 @@ export class MarketAnalysisService {
     };
     this.scanInterval = null;
     this.lastAutoTradeTime = 0;
+    this.isEvaluatingAutoPilot = false;
+    this.lastAutoPilotErrorTime = 0;
+    this.onTradeCallback = null;
   }
 
   setMarginGuardian(guardian) {
@@ -451,136 +454,185 @@ export class MarketAnalysisService {
    * Auto-Pilot: Automatically trades the highest-ranking opportunities with dynamic TP / SL
    */
   async evaluateAutoPilot(rankedCoins) {
-    const now = Date.now();
-    // Cooldown: at least 20 seconds between auto trades
-    if (now - this.lastAutoTradeTime < 20000) return;
+    if (this.isEvaluatingAutoPilot) return;
+    this.isEvaluatingAutoPilot = true;
 
-    const isLive = paperTrading.isLive && binanceService.liveExchange;
+    try {
+      const now = Date.now();
+      // Cooldown: at least 20 seconds between auto trades
+      if (now - this.lastAutoTradeTime < 20000) return;
 
-    // Check open positions count
-    const currentPositions = isLive ? await binanceService.getLivePositions() : paperTrading.positions;
-    if (currentPositions.length >= this.autoPilotConfig.maxOpenTrades) return;
+      const isLive = Boolean(paperTrading.isLive && binanceService.liveExchange);
 
-    let effectiveAllocation = this.autoPilotConfig.allocationUsdt;
-    let effectiveLeverage = this.autoPilotConfig.leverage || 10;
+      // Check open positions count
+      const currentPositions = isLive ? await binanceService.getLivePositions() : paperTrading.positions;
+      if (currentPositions.length >= this.autoPilotConfig.maxOpenTrades) return;
 
-    if (isLive) {
-      const liveBal = await binanceService.getLiveBalance();
-      const availableMargin = liveBal?.availableBalance || 0;
-      if (availableMargin <= 0.3) return;
-      if (availableMargin < effectiveAllocation) {
-        // Adapt margin to fit user's available wallet balance (e.g. $1.45 wallet -> ~$0.75 margin at 10x = $7.50 notional)
-        effectiveAllocation = Number(Math.max(0.6, availableMargin * 0.65).toFixed(2));
-        if (effectiveAllocation > availableMargin) effectiveAllocation = Number((availableMargin * 0.92).toFixed(2));
-        if (effectiveAllocation * effectiveLeverage < 5.6) {
-          effectiveLeverage = Math.min(20, Math.ceil(6.0 / effectiveAllocation));
-        }
-      }
-    }
+      let effectiveAllocation = Number(this.autoPilotConfig.allocationUsdt || 10);
+      let effectiveLeverage = Number(this.autoPilotConfig.leverage || 10);
 
-    for (const coin of rankedCoins) {
-      if (coin.confidence < this.autoPilotConfig.minConfidence) continue;
-      if (coin.action === 'HOLD') continue;
-
-      // Filter by direction preference
-      if (coin.action === 'LONG' && this.autoPilotConfig.directionPreference === 'SHORT_ONLY') continue;
-      if (coin.action === 'SHORT' && this.autoPilotConfig.directionPreference === 'LONG_ONLY') continue;
-
-      // In Live mode, skip high-minNotional pairs (BTC/ETH/LINK) if position notional < pair's minNotional
       if (isLive) {
-        const pairInfo = CONFIG.DEFAULT_PAIRS.find(p => p.symbol === coin.symbol);
-        const minNotional = pairInfo?.minNotional || 5.5;
-        const minCoinCost = (pairInfo?.minQty || 0.001) * coin.price;
-        const requiredNotional = Math.max(minNotional, minCoinCost);
-        if (effectiveAllocation * effectiveLeverage < requiredNotional) {
-          continue; // Automatically pick the next high-confidence affordable pair (e.g. DOGE, XRP, ADA, SUI, SOL, NEAR)
+        const liveBal = await binanceService.getLiveBalance();
+        const availableMargin = liveBal?.availableBalance || 0;
+        if (availableMargin < 0.32) {
+          if (now - this.lastAutoPilotErrorTime > 30000 && this.io) {
+            this.lastAutoPilotErrorTime = now;
+            this.io.emit('autopilot_error', {
+              message: `Insufficient Binance available margin ($${availableMargin.toFixed(2)}). Need at least $0.35 USDT at 20x.`,
+              timestamp: new Date().toISOString()
+            });
+          }
+          return;
+        }
+
+        // Leave ~15% buffer for fees/maintenance margin so Binance won't reject with -2019
+        const maxSafeMargin = Number((availableMargin * 0.85).toFixed(2));
+        effectiveAllocation = Math.max(0.28, Math.min(effectiveAllocation, maxSafeMargin));
+        if (effectiveAllocation > availableMargin * 0.92) {
+          effectiveAllocation = maxSafeMargin;
+        }
+
+        // Unconditionally ensure Binance Futures $5.50+ min notional is satisfied
+        if (effectiveAllocation * effectiveLeverage < 5.6) {
+          effectiveLeverage = Math.min(20, Math.max(effectiveLeverage, Math.ceil(6.0 / Math.max(0.28, effectiveAllocation))));
+        }
+        if (effectiveAllocation * effectiveLeverage < 5.5 && maxSafeMargin * 20 >= 5.5) {
+          effectiveAllocation = Number(Math.min(maxSafeMargin, 0.32).toFixed(2));
+          effectiveLeverage = 20;
+        }
+        if (effectiveAllocation * effectiveLeverage < 5.5) {
+          if (now - this.lastAutoPilotErrorTime > 30000 && this.io) {
+            this.lastAutoPilotErrorTime = now;
+            this.io.emit('autopilot_error', {
+              message: `Available Binance margin ($${availableMargin.toFixed(2)}) is below Binance $5.50 minimum notional at 20x.`,
+              timestamp: new Date().toISOString()
+            });
+          }
+          return;
         }
       }
 
-      // Protection: Skip coins experiencing falling knife capitulation or severe trap warnings
-      if (coin.isFallingKnife) continue;
-      if (coin.action === 'LONG' && coin.trapWarning?.includes('BULL TRAP')) continue;
-      if (coin.action === 'SHORT' && coin.trapWarning?.includes('BEAR TRAP')) continue;
+      for (const coin of rankedCoins) {
+        if (coin.confidence < this.autoPilotConfig.minConfidence) continue;
+        if (coin.action === 'HOLD') continue;
 
-      // Don't open if already in position for this coin
-      const alreadyOpen = currentPositions.some(p => p.symbol === coin.symbol);
-      if (alreadyOpen) continue;
+        // Filter by direction preference
+        if (coin.action === 'LONG' && this.autoPilotConfig.directionPreference === 'SHORT_ONLY') continue;
+        if (coin.action === 'SHORT' && this.autoPilotConfig.directionPreference === 'LONG_ONLY') continue;
 
-      try {
-        let liveOrder = null;
+        // In Live mode, skip high-minNotional pairs (BTC/ETH/LINK) if position notional < pair's minNotional
         if (isLive) {
-          liveOrder = await binanceService.executeLiveOrder({
-            symbol: coin.symbol,
-            side: coin.action,
-            amountUsdt: effectiveAllocation,
-            leverage: effectiveLeverage
-          });
+          const pairInfo = CONFIG.DEFAULT_PAIRS.find(p => p.symbol === coin.symbol);
+          const minNotional = pairInfo?.minNotional || 5.5;
+          const minCoinCost = (pairInfo?.minQty || 0.001) * coin.price;
+          const requiredNotional = Math.max(minNotional, minCoinCost);
+          if (effectiveAllocation * effectiveLeverage < requiredNotional * 0.98) {
+            continue; // Automatically pick the next high-confidence affordable pair (e.g. DOGE, XRP, ADA, SUI, SOL, NEAR)
+          }
         }
 
-        const pos = paperTrading.openPosition({
-          symbol: coin.symbol,
-          side: coin.action,
-          amountUsdt: effectiveAllocation,
-          leverage: effectiveLeverage,
-          markPrice: coin.price,
-          tp: coin.tpPrice,
-          sl: coin.slPrice,
-          trailingStopPct: 2.0,
-          source: isLive ? 'BINANCE_LIVE_AUTOPILOT' : 'AI_AUTO_PILOT'
-        });
+        // Protection: Skip coins experiencing falling knife capitulation or severe trap warnings
+        if (coin.isFallingKnife) continue;
+        if (coin.action === 'LONG' && coin.trapWarning?.includes('BULL TRAP')) continue;
+        if (coin.action === 'SHORT' && coin.trapWarning?.includes('BEAR TRAP')) continue;
 
-        if (liveOrder) {
-          pos.binanceOrderId = liveOrder.id;
-        }
+        // Don't open if already in position for this coin
+        const alreadyOpen = currentPositions.some(p => p.symbol === coin.symbol);
+        if (alreadyOpen) continue;
 
-        // Register dynamic TP/SL targets with Margin Guardian for 24/7 Auto-Close
-        if (this.marginGuardian) {
-          this.marginGuardian.setTarget(pos.id, {
-            tp: coin.tpPrice,
-            sl: coin.slPrice,
-            trailingStopPct: 2.0
-          });
-          this.marginGuardian.setTarget(coin.symbol, {
-            tp: coin.tpPrice,
-            sl: coin.slPrice,
-            trailingStopPct: 2.0
-          });
+        try {
+          let pos = null;
+
           if (isLive) {
+            const liveOrder = await binanceService.executeLiveOrder({
+              symbol: coin.symbol,
+              side: coin.action,
+              amountUsdt: effectiveAllocation,
+              leverage: effectiveLeverage
+            });
+
             const cleanSym = coin.symbol.replace('/', '').toUpperCase();
-            this.marginGuardian.setTarget(`BINANCE-${cleanSym}-${coin.action}`, {
+            const posId = `BINANCE-${cleanSym}-${coin.action}`;
+            pos = {
+              id: posId,
+              symbol: cleanSym,
+              side: coin.action,
+              entryPrice: coin.price,
+              currentPrice: coin.price,
+              leverage: effectiveLeverage,
+              margin: effectiveAllocation,
               tp: coin.tpPrice,
               sl: coin.slPrice,
-              trailingStopPct: 2.0
+              trailingStopPct: 2.0,
+              source: 'BINANCE_LIVE_AUTOPILOT',
+              binanceOrderId: liveOrder?.id || null,
+              openedAt: new Date().toISOString()
+            };
+
+            if (this.marginGuardian) {
+              this.marginGuardian.setTarget(posId, { tp: coin.tpPrice, sl: coin.slPrice, trailingStopPct: 2.0 });
+              this.marginGuardian.setTarget(cleanSym, { tp: coin.tpPrice, sl: coin.slPrice, trailingStopPct: 2.0 });
+            }
+          } else {
+            pos = paperTrading.openPosition({
+              symbol: coin.symbol,
+              side: coin.action,
+              amountUsdt: effectiveAllocation,
+              leverage: effectiveLeverage,
+              markPrice: coin.price,
+              tp: coin.tpPrice,
+              sl: coin.slPrice,
+              trailingStopPct: 2.0,
+              source: 'AI_AUTO_PILOT'
+            });
+
+            if (this.marginGuardian) {
+              this.marginGuardian.setTarget(pos.id, { tp: coin.tpPrice, sl: coin.slPrice, trailingStopPct: 2.0 });
+              this.marginGuardian.setTarget(coin.symbol, { tp: coin.tpPrice, sl: coin.slPrice, trailingStopPct: 2.0 });
+            }
+          }
+
+          this.lastAutoTradeTime = now;
+
+          const tradeAlert = {
+            id: `AP-${Date.now()}`,
+            timestamp: new Date().toISOString(),
+            message: `🤖 AI Auto-Pilot opened ${coin.action} on ${coin.symbol} @ $${coin.price} ($${effectiveAllocation} Margin, ${effectiveLeverage}x, Conf: ${coin.confidence}%) [${isLive ? 'LIVE BINANCE' : 'DEMO'}]`,
+            position: pos
+          };
+
+          if (this.io) {
+            this.io.emit('position_opened', pos);
+            this.io.emit('autopilot_trade', tradeAlert);
+            if (isLive) {
+              const updatedLiveBal = await binanceService.getLiveBalance();
+              const updatedLivePos = await binanceService.getLivePositions();
+              if (updatedLiveBal) this.io.emit('account_summary', updatedLiveBal);
+              this.io.emit('positions_update', updatedLivePos || []);
+            } else {
+              this.io.emit('account_summary', paperTrading.getBalance());
+              this.io.emit('positions_update', paperTrading.positions);
+            }
+          }
+
+          if (this.onTradeCallback) {
+            try { await this.onTradeCallback(); } catch {}
+          }
+          break; // open 1 trade per cycle
+        } catch (err) {
+          console.warn('[MarketAnalysisService] Auto-Pilot open error:', err.message);
+          if (now - this.lastAutoPilotErrorTime > 15000 && this.io) {
+            this.lastAutoPilotErrorTime = now;
+            this.io.emit('autopilot_error', {
+              symbol: coin.symbol,
+              message: `Auto-Pilot order failed on ${coin.symbol}: ${err.message}`,
+              timestamp: new Date().toISOString()
             });
           }
         }
-
-        this.lastAutoTradeTime = now;
-
-        const tradeAlert = {
-          id: `AP-${Date.now()}`,
-          timestamp: new Date().toISOString(),
-          message: `🤖 AI Auto-Pilot opened ${coin.action} on ${coin.symbol} @ $${coin.price} (TP1: $${coin.tpPrice}, SL: $${coin.slPrice}, Conf: ${coin.confidence}%) [${isLive ? 'LIVE BINANCE' : 'DEMO'}]`,
-          position: pos
-        };
-
-        if (this.io) {
-          this.io.emit('position_opened', pos);
-          this.io.emit('autopilot_trade', tradeAlert);
-          if (isLive) {
-            const updatedLiveBal = await binanceService.getLiveBalance();
-            const updatedLivePos = await binanceService.getLivePositions();
-            if (updatedLiveBal) this.io.emit('account_summary', updatedLiveBal);
-            this.io.emit('positions_update', updatedLivePos || []);
-          } else {
-            this.io.emit('account_summary', paperTrading.getBalance());
-            this.io.emit('positions_update', paperTrading.positions);
-          }
-        }
-        break; // open 1 trade per cycle
-      } catch (err) {
-        console.warn('[MarketAnalysisService] Auto-Pilot open error:', err.message);
       }
+    } finally {
+      this.isEvaluatingAutoPilot = false;
     }
   }
 

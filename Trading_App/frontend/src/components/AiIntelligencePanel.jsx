@@ -1,13 +1,26 @@
 import React from 'react';
 import { Cpu, Sparkles, TrendingUp, TrendingDown, Target, Shield, Compass, Newspaper, Activity } from 'lucide-react';
 
-export function AiIntelligencePanel({ aiData, activeSymbol, onExecuteRecommendedTrade }) {
+export function AiIntelligencePanel({ aiData, activeSymbol, account, onExecuteRecommendedTrade }) {
   if (!aiData) return null;
 
   const { aiScore = 0, recommendation = 'NEUTRAL', confidence = 70, targetPrice, stopLoss, factors = [], patterns = [], sentiment = {} } = aiData;
 
   const isBullish = aiScore > 10;
   const isBearish = aiScore < -10;
+
+  const avail = Number(account?.availableBalance || 0);
+  const isLive = Boolean(account?.isLive);
+  let smartMargin = 250;
+  let smartLeverage = 10;
+  if (isLive) {
+    smartMargin = avail >= 1 ? Math.min(25, Math.max(0.5, Number((avail * 0.65).toFixed(2)))) : Math.max(0.35, Number((avail * 0.8).toFixed(2)));
+    if (smartMargin * smartLeverage < 6) {
+      smartLeverage = Math.min(20, Math.ceil(6.0 / Math.max(0.35, smartMargin)));
+    }
+  } else if (avail > 0 && avail < 250) {
+    smartMargin = Number((avail * 0.5).toFixed(2));
+  }
 
   return (
     <div className="glass-panel" style={{ padding: '20px', display: 'flex', flexDirection: 'column', gap: '16px' }}>
@@ -89,8 +102,8 @@ export function AiIntelligencePanel({ aiData, activeSymbol, onExecuteRecommended
               onClick={() => onExecuteRecommendedTrade({
                 symbol: activeSymbol,
                 side: isBullish ? 'LONG' : 'SHORT',
-                amountUsdt: 250,
-                leverage: 10,
+                amountUsdt: smartMargin,
+                leverage: smartLeverage,
                 tp: targetPrice,
                 sl: stopLoss,
                 trailingStopPct: 2.0
@@ -98,7 +111,7 @@ export function AiIntelligencePanel({ aiData, activeSymbol, onExecuteRecommended
               className={isBullish ? 'btn btn-long' : 'btn btn-short'}
               style={{ marginTop: '4px', padding: '7px 12px', fontSize: '11px', fontWeight: 800 }}
             >
-              Execute 1-Click AI {isBullish ? 'LONG' : 'SHORT'} ($250)
+              Execute 1-Click AI {isBullish ? 'LONG' : 'SHORT'} (${smartMargin} · {smartLeverage}x)
             </button>
           )}
         </div>

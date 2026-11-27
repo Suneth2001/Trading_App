@@ -98,11 +98,11 @@ export class BinanceService {
           if (errMsg.includes('-2008') || errMsg.includes('Invalid Api-Key ID')) {
             errMsg = 'Invalid Binance API Key. Please double-check that you copied the complete API Key correctly without missing characters.';
           } else if (errMsg.includes('-2015') || errMsg.includes('Invalid API-key') || errMsg.includes('AuthenticationError')) {
-            errMsg = 'Invalid Binance API Key or Secret. If you want to trade Futures, you must add your IP (112.134.246.225) to trusted IPs on Binance and tick "Enable Futures".';
+            errMsg = 'Invalid Binance API Key, Secret, or IP restriction. Your router public IP may have changed — check Settings -> Current IP and add it to trusted IPs on Binance with "Enable Futures" checked.';
           } else if (errMsg.includes('-1021') || errMsg.includes('Timestamp')) {
             errMsg = 'System clock out of sync. Please synchronize your computer time in Windows Settings.';
           } else if (errMsg.includes('IP') || errMsg.includes('restricted')) {
-            errMsg = 'Binance IP Access Restriction. Please add your IP (112.134.246.225) to trusted IPs in Binance API Management.';
+            errMsg = 'Binance IP Access Restriction. Please add your current public IP in Settings to trusted IPs in Binance API Management.';
           }
 
           return {
@@ -361,7 +361,8 @@ export class BinanceService {
   async closeLivePosition({ symbol, side, size }) {
     if (!this.liveExchange) return null;
     const cleanSym = symbol.replace('/', '').toUpperCase();
-    const marketSymbol = `${cleanSym.replace('USDT', '')}/USDT:USDT`;
+    const futuresSym = cleanSym === 'PEPEUSDT' ? '1000PEPEUSDT' : cleanSym;
+    const marketSymbol = `${futuresSym.replace('USDT', '')}/USDT:USDT`;
     const closeSide = side === 'LONG' ? 'sell' : 'buy';
 
     try {

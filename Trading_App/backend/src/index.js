@@ -31,7 +31,7 @@ const io = new Server(server, {
 
 // Initialize Services
 const marginGuardian = new MarginGuardian(io);
-const strategyEngine = new StrategyEngine(io);
+const strategyEngine = new StrategyEngine(io, marginGuardian);
 const tradingViewWebhook = new TradingViewWebhookHandler(io);
 const marketAnalysis = new MarketAnalysisService(io, marginGuardian);
 
@@ -160,6 +160,8 @@ app.post('/api/account/reset', (req, res) => {
   const result = paperTrading.resetAccount(balance || CONFIG.PAPER_TRADING_DEFAULT_BALANCE);
   io.emit('account_summary', result);
   io.emit('positions_update', []);
+  saveRuntimeState();
+  pushCloudSync();
   res.json({ success: true, summary: result });
 });
 
@@ -180,12 +182,14 @@ app.post('/api/account/mode', async (req, res) => {
     if (liveBal) {
       io.emit('account_summary', liveBal);
       io.emit('positions_update', livePos);
+      pushCloudSync();
       return res.json({ success: true, ...result, summary: liveBal, positions: livePos });
     }
   }
 
   io.emit('account_summary', paperTrading.getBalance());
   io.emit('positions_update', paperTrading.positions);
+  pushCloudSync();
   res.json({ success: true, ...result, summary: paperTrading.getBalance(), positions: paperTrading.positions });
 });
 
@@ -205,12 +209,14 @@ app.post('/api/account/api-keys', async (req, res) => {
       if (livePos) {
         io.emit('positions_update', livePos);
       }
+      pushCloudSync();
       return res.json({ ...result, isLive: true, summary: liveBal, positions: livePos });
     } else if (result.success && (!apiKey || !apiSecret)) {
       paperTrading.setLiveMode(false);
       const demoBal = paperTrading.getBalance();
       io.emit('account_summary', demoBal);
       io.emit('positions_update', paperTrading.positions);
+      pushCloudSync();
       return res.json({ ...result, isLive: false, summary: demoBal, positions: paperTrading.positions });
     }
     
@@ -256,43 +262,61 @@ app.post('/api/order/open', async (req, res) => {
       return res.status(400).json({ error: `Price unavailable for ${symbol}` });
     }
 
+    const effLeverage = Number(leverage || CONFIG.DEFAULT_LEVERAGE);
+    const effAmount = Number(amountUsdt);
+    let position = null;
     let liveOrder = null;
-    if (paperTrading.isLive) {
+
+    if (paperTrading.isLive && binanceService.liveExchange) {
       try {
         liveOrder = await binanceService.executeLiveOrder({
           symbol,
           side,
-          amountUsdt: Number(amountUsdt),
-          leverage: Number(leverage || CONFIG.DEFAULT_LEVERAGE)
+          amountUsdt: effAmount,
+          leverage: effLeverage
         });
       } catch (liveErr) {
         return res.status(400).json({ error: `Binance Live Order Error: ${liveErr.message}` });
       }
-    }
 
-    const position = paperTrading.openPosition({
-      symbol,
-      side,
-      amountUsdt: Number(amountUsdt),
-      leverage: Number(leverage || CONFIG.DEFAULT_LEVERAGE),
-      markPrice,
-      tp,
-      sl,
-      trailingStopPct,
-      source: paperTrading.isLive ? 'BINANCE_LIVE' : 'MANUAL'
-    });
+      const cleanSym = symbol.replace('/', '').toUpperCase();
+      const posId = `BINANCE-${cleanSym}-${side}`;
+      position = {
+        id: posId,
+        symbol: cleanSym,
+        side,
+        entryPrice: markPrice,
+        currentPrice: markPrice,
+        leverage: effLeverage,
+        margin: effAmount,
+        tp: tp ? Number(tp) : null,
+        sl: sl ? Number(sl) : null,
+        trailingStopPct: trailingStopPct ? Number(trailingStopPct) : null,
+        source: 'BINANCE_LIVE',
+        binanceOrderId: liveOrder?.id || null,
+        openedAt: new Date().toISOString()
+      };
 
-    if (liveOrder) {
-      position.binanceOrderId = liveOrder.id;
-    }
+      if (tp || sl) {
+        marginGuardian.setTarget(posId, { tp, sl, trailingStopPct });
+        marginGuardian.setTarget(cleanSym, { tp, sl, trailingStopPct });
+      }
+    } else {
+      position = paperTrading.openPosition({
+        symbol,
+        side,
+        amountUsdt: effAmount,
+        leverage: effLeverage,
+        markPrice,
+        tp,
+        sl,
+        trailingStopPct,
+        source: 'MANUAL'
+      });
 
-    // Register TP, SL and trailing stop targets with Margin Guardian for 24/7 auto-close
-    if (tp || sl) {
-      marginGuardian.setTarget(position.id, { tp, sl, trailingStopPct });
-      marginGuardian.setTarget(symbol, { tp, sl, trailingStopPct });
-      if (paperTrading.isLive) {
-        const cleanSym = symbol.replace('/', '').toUpperCase();
-        marginGuardian.setTarget(`BINANCE-${cleanSym}-${side}`, { tp, sl, trailingStopPct });
+      if (tp || sl) {
+        marginGuardian.setTarget(position.id, { tp, sl, trailingStopPct });
+        marginGuardian.setTarget(symbol, { tp, sl, trailingStopPct });
       }
     }
 
@@ -369,6 +393,8 @@ app.post('/api/order/close-all', async (req, res) => {
     }
     const closed = paperTrading.closeAllPositions(binanceService.getCurrentPrices(), 'PANIC_CLOSE_ALL');
     await broadcastAccountState();
+    saveRuntimeState();
+    pushCloudSync();
     res.json({ success: true, count: closed.length, closed });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -381,6 +407,7 @@ app.get('/api/bot/status', (req, res) => {
 });
 
 app.post('/api/bot/config', (req, res) => {
+  lastLocalControlTime = Date.now();
   const updated = strategyEngine.updateConfig(req.body);
   io.emit('bot_status', updated);
   pushCloudSync();
@@ -388,6 +415,7 @@ app.post('/api/bot/config', (req, res) => {
 });
 
 app.post('/api/bot/start', (req, res) => {
+  lastLocalControlTime = Date.now();
   const status = strategyEngine.start();
   io.emit('bot_status', status);
   pushCloudSync();
@@ -395,6 +423,7 @@ app.post('/api/bot/start', (req, res) => {
 });
 
 app.post('/api/bot/stop', (req, res) => {
+  lastLocalControlTime = Date.now();
   const status = strategyEngine.stop();
   io.emit('bot_status', status);
   pushCloudSync();
@@ -484,18 +513,21 @@ app.get('/api/autopilot/status', (req, res) => {
 });
 
 app.post('/api/autopilot/start', (req, res) => {
+  lastLocalControlTime = Date.now();
   const status = marketAnalysis.startAutoPilot();
   pushCloudSync();
   res.json(status);
 });
 
 app.post('/api/autopilot/stop', (req, res) => {
+  lastLocalControlTime = Date.now();
   const status = marketAnalysis.stopAutoPilot();
   pushCloudSync();
   res.json(status);
 });
 
 app.post('/api/autopilot/config', (req, res) => {
+  lastLocalControlTime = Date.now();
   const status = marketAnalysis.updateAutoPilotConfig(req.body);
   io.emit('autopilot_status', status);
   pushCloudSync();
@@ -542,7 +574,8 @@ const saveRuntimeState = () => {
       guardianSettings: marginGuardian.getSettings(),
       positionTargets: marginGuardian.positionTargets,
       botStatus: strategyEngine.getStatus(),
-      autopilotStatus: marketAnalysis.getAutoPilotStatus()
+      autopilotStatus: marketAnalysis.getAutoPilotStatus(),
+      lastAppliedSyncTime
     }, null, 2));
   } catch {}
 };
@@ -551,6 +584,7 @@ const loadRuntimeState = () => {
   try {
     if (!fs.existsSync(RUNTIME_STATE_FILE)) return;
     const saved = JSON.parse(fs.readFileSync(RUNTIME_STATE_FILE, 'utf8'));
+    if (saved.lastAppliedSyncTime) lastAppliedSyncTime = Number(saved.lastAppliedSyncTime);
     if (saved.balance !== undefined) paperTrading.balance = saved.balance;
     if (saved.initialBalance !== undefined) paperTrading.initialBalance = saved.initialBalance;
     if (Array.isArray(saved.positions)) paperTrading.positions = saved.positions;
@@ -568,14 +602,17 @@ const loadRuntimeState = () => {
   } catch {}
 };
 
-loadRuntimeState();
 setInterval(saveRuntimeState, 3000);
 
 // ================= CROSS-DEVICE REAL-TIME CLOUD SYNC (LAPTOP <-> MOBILE) ================= //
 const SYNC_DEVICE_ID = 'PC-' + Math.random().toString(36).slice(2, 10);
-const SYNC_TOPIC = 'apexalgo_cloud_sync_suneth2001_v2';
+const SYNC_TOPIC = 'apexalgo_cloud_sync_suneth2001_v3';
 let lastAppliedSyncTime = 0;
+let lastLocalControlTime = 0;
 let isApplyingRemoteSync = false;
+
+strategyEngine.onTradeCallback = () => pushCloudSync();
+marketAnalysis.onTradeCallback = () => pushCloudSync();
 
 async function pushCloudSync() {
   if (isApplyingRemoteSync) return;
@@ -613,8 +650,10 @@ async function pushCloudSync() {
       leverage: botSt.leverage,
       stopLossPct: botSt.stopLossPct,
       takeProfitPct: botSt.takeProfitPct,
+      trailingStopPct: botSt.trailingStopPct,
       timeframe: botSt.timeframe,
-      recentLogs: (botSt.recentLogs || []).slice(0, 8)
+      lastScanSummary: botSt.lastScanSummary,
+      recentLogs: (botSt.recentLogs || []).slice(0, 10)
     },
     autopilotStatus: marketAnalysis.getAutoPilotStatus(),
     guardianSettings: {
@@ -639,10 +678,14 @@ function applyRemoteSnapshot(snap) {
   if (!snap || typeof snap !== 'object') return;
   if (snap.deviceId === SYNC_DEVICE_ID) return;
   if (!snap.updatedAt || snap.updatedAt <= lastAppliedSyncTime) return;
+  if (snap.updatedAt <= lastLocalControlTime + 2500) return;
 
   isApplyingRemoteSync = true;
   try {
     lastAppliedSyncTime = snap.updatedAt;
+    if (snap.isLive !== undefined && (Boolean(snap.isLive) === false || binanceService.liveExchange)) {
+      paperTrading.setLiveMode(Boolean(snap.isLive));
+    }
     if (snap.balance !== undefined) paperTrading.balance = Number(snap.balance);
     if (snap.initialBalance !== undefined) paperTrading.initialBalance = Number(snap.initialBalance);
     if (Array.isArray(snap.positions)) paperTrading.positions = snap.positions;
@@ -715,10 +758,6 @@ function connectCloudSyncWs() {
   } catch {}
 }
 
-pollCloudSync();
-connectCloudSyncWs();
-setInterval(pollCloudSync, 4000);
-
 // Generate & serve Apple iOS WebClip Configuration Profile (.mobileconfig) for 1-Tap iPhone Installation
 app.get('/ApexAlgo-iPhone.mobileconfig', (req, res) => {
   const hostUrl = `${req.protocol}://${req.get('host')}/`;
@@ -776,25 +815,32 @@ app.get('/ApexAlgo-iPhone.mobileconfig', (req, res) => {
   res.send(mobileConfigXml);
 });
 
-// Start Server on 0.0.0.0 so both localhost and Mobile LAN devices can connect
-server.listen(CONFIG.PORT, '0.0.0.0', () => {
-  console.log(`================================================================`);
-  console.log(`  CRYPTO AUTO-TRADING ENGINE BACKEND RUNNING ON PORT ${CONFIG.PORT} `);
-  console.log(`  TRADINGVIEW WEBHOOK URL: http://localhost:${CONFIG.PORT}${CONFIG.TRADINGVIEW.WEBHOOK_PATH}`);
-  console.log(`  MARGIN GUARDIAN: ACTIVE (Auto-Close at ${CONFIG.MARGIN_GUARDIAN.DEFAULT_CRITICAL_MARGIN_RATIO}% Margin)`);
-  console.log(`================================================================`);
-
-  // Auto-restore saved live Binance credentials on startup
-  (async () => {
-    try {
-      const credsResult = await binanceService.loadSavedCredentials();
-      if (credsResult && credsResult.success && binanceService.liveExchange) {
-        paperTrading.setLiveMode(true);
-        console.log(`[Binance] Live Trading Mode restored on boot! (${credsResult.message})`);
-        await broadcastAccountState();
-      }
-    } catch (err) {
-      console.warn('[Binance] Startup credentials load failed:', err.message);
+// Initialize Live credentials + persisted runtime state BEFORE accepting HTTP/Socket requests
+async function bootstrapServer() {
+  try {
+    const credsResult = await binanceService.loadSavedCredentials();
+    if (credsResult && credsResult.success && binanceService.liveExchange) {
+      paperTrading.setLiveMode(true);
+      console.log(`[Binance] Live Trading Mode restored on boot! (${credsResult.message})`);
     }
-  })();
-});
+  } catch (err) {
+    console.warn('[Binance] Startup credentials load failed:', err.message);
+  }
+
+  loadRuntimeState();
+
+  server.listen(CONFIG.PORT, '0.0.0.0', () => {
+    console.log(`================================================================`);
+    console.log(`  CRYPTO AUTO-TRADING ENGINE BACKEND RUNNING ON PORT ${CONFIG.PORT} `);
+    console.log(`  TRADINGVIEW WEBHOOK URL: http://localhost:${CONFIG.PORT}${CONFIG.TRADINGVIEW.WEBHOOK_PATH}`);
+    console.log(`  MARGIN GUARDIAN: ACTIVE (Auto-Close at ${CONFIG.MARGIN_GUARDIAN.DEFAULT_CRITICAL_MARGIN_RATIO}% Margin)`);
+    console.log(`================================================================`);
+
+    broadcastAccountState();
+    pollCloudSync();
+    connectCloudSyncWs();
+    setInterval(pollCloudSync, 6000);
+  });
+}
+
+bootstrapServer();

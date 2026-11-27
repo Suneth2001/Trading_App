@@ -17,24 +17,11 @@ import { BottomNav } from './components/BottomNav';
 import { SettingsModal } from './components/SettingsModal';
 import { soundFX } from './utils/audioAlerts';
 import { getSocketUrl } from './utils/apiConfig';
-import { standaloneEngine } from './utils/standaloneEngine';
+import { standaloneEngine, STRATEGIES, DEFAULT_PAIRS } from './utils/standaloneEngine';
 
 export function App() {
   const [activeSymbol, setActiveSymbol] = useState(() => localStorage.getItem('apex_active_symbol') || 'BTCUSDT');
-  const [pairs, setPairs] = useState([
-    { symbol: 'BTCUSDT', name: 'Bitcoin', base: 'BTC', quote: 'USDT', precision: 2 },
-    { symbol: 'ETHUSDT', name: 'Ethereum', base: 'ETH', quote: 'USDT', precision: 2 },
-    { symbol: 'SOLUSDT', name: 'Solana', base: 'SOL', quote: 'USDT', precision: 2 },
-    { symbol: 'BNBUSDT', name: 'BNB', base: 'BNB', quote: 'USDT', precision: 2 },
-    { symbol: 'DOGEUSDT', name: 'Dogecoin', base: 'DOGE', quote: 'USDT', precision: 4 },
-    { symbol: 'XRPUSDT', name: 'Ripple', base: 'XRP', quote: 'USDT', precision: 4 },
-    { symbol: 'ADAUSDT', name: 'Cardano', base: 'ADA', quote: 'USDT', precision: 4 },
-    { symbol: 'AVAXUSDT', name: 'Avalanche', base: 'AVAX', quote: 'USDT', precision: 2 },
-    { symbol: 'LINKUSDT', name: 'Chainlink', base: 'LINK', quote: 'USDT', precision: 3 },
-    { symbol: 'SUIUSDT', name: 'Sui', quote: 'USDT', precision: 4 },
-    { symbol: 'NEARUSDT', name: 'NEAR Protocol', base: 'NEAR', quote: 'USDT', precision: 3 },
-    { symbol: 'PEPEUSDT', name: 'Pepe', base: 'PEPE', quote: 'USDT', precision: 8 }
-  ]);
+  const [pairs, setPairs] = useState(() => [...DEFAULT_PAIRS]);
   const [prices, setPrices] = useState(() => ({ ...standaloneEngine.prices }));
   const [tickerStats, setTickerStats] = useState({});
   const [candles, setCandles] = useState([]);
@@ -44,7 +31,7 @@ export function App() {
   const [positions, setPositions] = useState(() => [...standaloneEngine.getActivePositions()]);
   const [history, setHistory] = useState(() => [...standaloneEngine.orderHistory]);
   const [botStatus, setBotStatus] = useState(() => ({ ...standaloneEngine.botStatus }));
-  const [strategies, setStrategies] = useState(() => [...standaloneEngine.constructor ? [] : []]);
+  const [strategies, setStrategies] = useState(() => [...STRATEGIES]);
   const [guardianSettings, setGuardianSettings] = useState(() => ({ ...standaloneEngine.guardianSettings }));
   const [marketAnalysis, setMarketAnalysis] = useState(() => [...(standaloneEngine.marketAnalysisCache || [])]);
   const [autopilotStatus, setAutopilotStatus] = useState(() => ({ ...standaloneEngine.autopilotStatus }));
@@ -144,7 +131,19 @@ export function App() {
       .then(data => setWebhookData(data))
       .catch(console.error);
 
-    // Socket Event Listeners
+    // Socket Event Listeners & Single-Master Backend Coordination
+    socket.on('connect', () => {
+      standaloneEngine.setExternalBackendActive(true);
+    });
+
+    socket.on('disconnect', () => {
+      standaloneEngine.setExternalBackendActive(false);
+    });
+
+    socket.on('connect_error', () => {
+      standaloneEngine.setExternalBackendActive(false);
+    });
+
     socket.on('price_tick', ({ symbol, price, stats }) => {
       setPrices(prev => ({ ...prev, [symbol]: price }));
       if (stats) {
@@ -180,6 +179,12 @@ export function App() {
       soundFX.playOrderPing();
       confetti({ particleCount: 50, spread: 45, origin: { y: 0.8 } });
       showNotification(`🤖 ${tradeAlert.message}`, 'SUCCESS');
+    });
+
+    socket.on('autopilot_error', (errData) => {
+      if (errData?.message) {
+        showNotification(`⚠️ Auto-Pilot: ${errData.message}`, 'DANGER');
+      }
     });
 
     socket.on('bot_log', (log) => {
@@ -258,6 +263,12 @@ export function App() {
         confetti({ particleCount: 50, spread: 45, origin: { y: 0.8 } });
         showNotification(`🤖 ${tradeAlert.message}`, 'SUCCESS');
       }),
+      standaloneEngine.on('autopilot_error', (errData) => {
+        if (socketRef.current?.connected) return;
+        if (errData?.message) {
+          showNotification(`⚠️ Auto-Pilot: ${errData.message}`, 'DANGER');
+        }
+      }),
       standaloneEngine.on('bot_log', (log) => {
         if (socketRef.current?.connected) return;
         setBotStatus(prev => ({
@@ -314,47 +325,32 @@ export function App() {
     try { localStorage.setItem('apex_sound_enabled', soundEnabled ? 'true' : 'false'); } catch {}
   }, [soundEnabled]);
 
-  useEffect(() => {
-    if (botStatus) {
-      standaloneEngine.botStatus = { ...standaloneEngine.botStatus, ...botStatus };
-      standaloneEngine._saveState();
-    }
-  }, [botStatus]);
-
-  useEffect(() => {
-    if (autopilotStatus) {
-      standaloneEngine.autopilotStatus = { ...standaloneEngine.autopilotStatus, ...autopilotStatus };
-      standaloneEngine._saveState();
-    }
-  }, [autopilotStatus]);
-
-  useEffect(() => {
-    if (guardianSettings) {
-      standaloneEngine.guardianSettings = { ...standaloneEngine.guardianSettings, ...guardianSettings };
-      standaloneEngine._saveState();
-    }
-  }, [guardianSettings]);
-
   // Fetch Klines & Indicators whenever symbol or timeframe changes
   useEffect(() => {
     const tf = (timeframe || '15m').toLowerCase();
-    fetch(`/api/klines?symbol=${activeSymbol}&interval=${tf}&limit=100`)
-      .then(res => res.json())
-      .then(data => {
-        if (Array.isArray(data)) setCandles(data);
-      })
-      .catch(console.error);
+    const fetchMarketSnapshot = () => {
+      fetch(`/api/klines?symbol=${activeSymbol}&interval=${tf}&limit=100`)
+        .then(res => res.json())
+        .then(data => {
+          if (Array.isArray(data)) setCandles(data);
+        })
+        .catch(console.error);
 
-    fetch(`/api/indicators?symbol=${activeSymbol}&interval=${tf}`)
-      .then(res => res.json())
-      .then(data => setIndicators(data))
-      .catch(console.error);
+      fetch(`/api/indicators?symbol=${activeSymbol}&interval=${tf}`)
+        .then(res => res.json())
+        .then(data => setIndicators(data))
+        .catch(console.error);
 
-    fetch(`/api/ai/analysis?symbol=${activeSymbol}&timeframe=${tf}`)
-      .then(res => res.json())
-      .then(data => setAiData(data))
-      .catch(console.error);
-  }, [activeSymbol, timeframe]);
+      fetch(`/api/ai/analysis?symbol=${activeSymbol}&timeframe=${tf}`)
+        .then(res => res.json())
+        .then(data => setAiData(data))
+        .catch(console.error);
+    };
+
+    fetchMarketSnapshot();
+    const timer = setInterval(fetchMarketSnapshot, activeTab === 'ai' ? 12000 : 30000);
+    return () => clearInterval(timer);
+  }, [activeSymbol, timeframe, activeTab]);
 
   const showNotification = (message, type = 'INFO') => {
     setNotification({ message, type, id: Date.now() });
@@ -904,6 +900,10 @@ export function App() {
           <AutoTradingBotPanel
             botStatus={botStatus}
             strategies={strategies}
+            pairs={pairs}
+            activeSymbol={activeSymbol}
+            isLive={Boolean(account?.isLive)}
+            availableBalance={Number(account?.availableBalance || 0)}
             onStartBot={handleStartBot}
             onStopBot={handleStopBot}
             onUpdateConfig={handleUpdateBotConfig}
@@ -929,6 +929,7 @@ export function App() {
           <AiIntelligencePanel
             aiData={aiData}
             activeSymbol={activeSymbol}
+            account={account}
             onExecuteRecommendedTrade={handleExecuteOrder}
           />
         )}

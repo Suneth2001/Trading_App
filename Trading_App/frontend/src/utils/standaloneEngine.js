@@ -529,7 +529,7 @@ class StandaloneTradingEngine {
     this.botStatus = savedState.botStatus ?? {
       isRunning: false,
       activeStrategyId: 'trend_following',
-      symbol: 'BTCUSDT',
+      symbol: 'AUTO_BEST',
       direction: 'BOTH',
       allocationUsdt: 500,
       leverage: 10,
@@ -537,8 +537,10 @@ class StandaloneTradingEngine {
       takeProfitPct: 8.0,
       trailingStopPct: 2.0,
       timeframe: '15m',
+      lastScanSummary: null,
       recentLogs: []
     };
+    if (!this.botStatus.symbol) this.botStatus.symbol = 'AUTO_BEST';
 
     this.autopilotStatus = savedState.autopilotStatus ?? {
       isAutoPilotRunning: false,
@@ -555,13 +557,37 @@ class StandaloneTradingEngine {
     this.webhookLogs = savedState.webhookLogs || [];
     this.marketAnalysisCache = savedState.marketAnalysisCache || [];
     this.lastAutoTradeTime = savedState.lastAutoTradeTime || 0;
+    this.lastBotTradeTime = 0;
+    this.lastBotHeartbeatTime = 0;
+    this.lastBotErrorTime = 0;
+    this.lastBotSwitchKey = '';
+    this.lastAutoPilotErrorTime = 0;
+    this.isBotEvaluating = false;
+    this.isAutoPilotEvaluating = false;
 
     // Cross-Device Real-Time Cloud Sync (Laptop <-> Mobile iPhone/Android)
     this.deviceId = 'MOB-' + Math.random().toString(36).slice(2, 10);
-    this.syncTopic = 'apexalgo_cloud_sync_suneth2001_v2';
+    this.syncTopic = 'apexalgo_cloud_sync_suneth2001_v3';
     this.lastAppliedSyncTime = savedState.lastAppliedSyncTime || 0;
+    this.lastLocalControlTime = 0;
     this.syncWs = null;
     this.isApplyingRemoteSync = false;
+    this.externalBackendActive = false;
+  }
+
+  setExternalBackendActive(active) {
+    const next = Boolean(active);
+    if (this.externalBackendActive === next) return;
+    this.externalBackendActive = next;
+    if (next) {
+      if (this.syncWs) {
+        try { this.syncWs.close(); } catch {}
+        this.syncWs = null;
+      }
+    } else if (this.started) {
+      this._connectCloudSyncWs();
+      this._pollCloudSync();
+    }
   }
 
   _loadState() {
@@ -603,7 +629,7 @@ class StandaloneTradingEngine {
   // ================= CROSS-DEVICE REAL-TIME CLOUD SYNC (LAPTOP <-> MOBILE) ================= //
 
   _pushCloudSync() {
-    if (this.isApplyingRemoteSync) return;
+    if (this.isApplyingRemoteSync || this.externalBackendActive) return;
     const now = Date.now();
     this.lastAppliedSyncTime = now;
     this._saveState();
@@ -627,8 +653,10 @@ class StandaloneTradingEngine {
         leverage: this.botStatus.leverage,
         stopLossPct: this.botStatus.stopLossPct,
         takeProfitPct: this.botStatus.takeProfitPct,
+        trailingStopPct: this.botStatus.trailingStopPct,
         timeframe: this.botStatus.timeframe,
-        recentLogs: (this.botStatus.recentLogs || []).slice(0, 8)
+        lastScanSummary: this.botStatus.lastScanSummary,
+        recentLogs: (this.botStatus.recentLogs || []).slice(0, 10)
       },
       autopilotStatus: this.autopilotStatus,
       guardianSettings: {
@@ -651,9 +679,11 @@ class StandaloneTradingEngine {
   }
 
   _applyRemoteSnapshot(snap) {
+    if (this.externalBackendActive) return;
     if (!snap || typeof snap !== 'object') return;
     if (snap.deviceId === this.deviceId) return;
     if (!snap.updatedAt || snap.updatedAt <= this.lastAppliedSyncTime) return;
+    if (snap.updatedAt <= this.lastLocalControlTime + 2500) return;
 
     this.isApplyingRemoteSync = true;
     try {
@@ -691,6 +721,7 @@ class StandaloneTradingEngine {
   }
 
   async _pollCloudSync() {
+    if (this.externalBackendActive) return;
     try {
       const f = window._nativeFetch || window.fetch.bind(window);
       const res = await f(`https://ntfy.sh/${this.syncTopic}/json?poll=1&since=12h`);
@@ -716,6 +747,7 @@ class StandaloneTradingEngine {
   }
 
   _connectCloudSyncWs() {
+    if (this.externalBackendActive) return;
     try {
       if (this.syncWs && (this.syncWs.readyState === 0 || this.syncWs.readyState === 1)) return;
       const ws = new WebSocket(`wss://ntfy.sh/${this.syncTopic}/ws`);
@@ -786,7 +818,7 @@ class StandaloneTradingEngine {
     return data;
   }
 
-  async verifyAndLoadLiveAccount(apiKey, apiSecret) {
+  async verifyAndLoadLiveAccount(apiKey, apiSecret, options = {}) {
     this.apiKey = (apiKey || '').trim();
     this.apiSecret = (apiSecret || '').trim();
     if (!this.apiKey || !this.apiSecret) {
@@ -794,6 +826,7 @@ class StandaloneTradingEngine {
       this.liveSummary = null;
       this.livePositions = [];
       this._saveState();
+      if (options.pushSync) this._pushCloudSync();
       return {
         success: true,
         isLive: false,
@@ -869,7 +902,10 @@ class StandaloneTradingEngine {
     };
     this.livePositions = livePositions;
     this._saveState();
-    this._pushCloudSync();
+    // NEVER push cloud sync on periodic balance polls (only when explicitly requested)
+    if (options.pushSync) {
+      this._pushCloudSync();
+    }
 
     this.emit('account_summary', this.liveSummary);
     this.emit('positions_update', this.livePositions);
@@ -933,8 +969,9 @@ class StandaloneTradingEngine {
     const pos = this.livePositions.find(p => p.id === positionId || p.symbol === positionId);
     if (!pos) throw new Error('Live position not found');
     const closeSide = pos.side === 'LONG' ? 'SELL' : 'BUY';
+    const futuresSym = pos.symbol === 'PEPEUSDT' ? '1000PEPEUSDT' : pos.symbol;
     await this._signedFuturesRequest('POST', '/fapi/v1/order', {
-      symbol: pos.symbol,
+      symbol: futuresSym,
       side: closeSide,
       type: 'MARKET',
       quantity: pos.size,
@@ -989,17 +1026,17 @@ class StandaloneTradingEngine {
       this.emit('market_analysis_update', this.marketAnalysisCache);
     }
 
-    // Auto-restore saved live Binance credentials on mobile startup
+    // Auto-restore saved live Binance credentials on mobile startup (if not using PC backend)
     const savedKey = localStorage.getItem('binance_api_key');
     const savedSecret = localStorage.getItem('binance_api_secret');
-    if (savedKey && savedSecret) {
+    if (savedKey && savedSecret && !this.externalBackendActive) {
       this.verifyAndLoadLiveAccount(savedKey, savedSecret).catch(() => {});
     }
 
     // Resume on mobile app foreground / wake from background
     if (typeof document !== 'undefined') {
       document.addEventListener('visibilitychange', () => {
-        if (document.visibilityState === 'visible') {
+        if (document.visibilityState === 'visible' && !this.externalBackendActive) {
           if (!this.ws || this.ws.readyState !== 1) {
             this._connectBinanceWs();
           }
@@ -1011,27 +1048,31 @@ class StandaloneTradingEngine {
       });
     }
 
-    // Guardian & Mark Price Update Loop (every 1.5s for both Demo and Live positions!)
+    // Guardian & Mark Price Update Loop (every 1.5s for both Demo and Live positions when standalone!)
     setInterval(() => {
-      this._updatePositionsAndGuardian();
+      if (!this.externalBackendActive) {
+        this._updatePositionsAndGuardian();
+      }
     }, 1500);
 
-    // Live Binance Account Sync Loop (every 3.5s when Live mode is active)
+    // Live Binance Account Sync Loop (every 3.5s when Live mode is active & standalone)
     setInterval(() => {
-      if (this.isLive && this.apiKey && this.apiSecret) {
+      if (!this.externalBackendActive && this.isLive && this.apiKey && this.apiSecret) {
         this.verifyAndLoadLiveAccount(this.apiKey, this.apiSecret).catch(() => {});
       }
     }, 3500);
 
-    // Market Scanner & AI Auto-Pilot Loop (every 6s)
-    setTimeout(() => this.runMarketScan(), 600);
+    // Market Scanner & AI Auto-Pilot Loop (every 6s when standalone)
+    setTimeout(() => {
+      if (!this.externalBackendActive) this.runMarketScan();
+    }, 600);
     setInterval(() => {
-      this.runMarketScan();
+      if (!this.externalBackendActive) this.runMarketScan();
     }, 6000);
 
-    // Auto Bot Loop (every 3.5s)
+    // Auto Bot Loop (every 3.5s when standalone)
     setInterval(() => {
-      if (this.botStatus.isRunning) {
+      if (!this.externalBackendActive && this.botStatus.isRunning) {
         this._evaluateBotCycle();
       }
     }, 3500);
@@ -1502,181 +1543,527 @@ class StandaloneTradingEngine {
     this._saveState();
     this.emit('market_analysis_update', results);
 
-    if (this.autopilotStatus.isAutoPilotRunning) {
+    if (this.autopilotStatus.isAutoPilotRunning && !this.externalBackendActive) {
       await this._evaluateAutoPilot(results);
     }
     return results;
   }
 
-  async _evaluateAutoPilot(rankedCoins) {
-    const now = Date.now();
-    if (now - this.lastAutoTradeTime < 20000) return;
-    const cfg = this.autopilotStatus.config;
-    const activePos = this.getActivePositions();
-    if (activePos.length >= cfg.maxOpenTrades) return;
-
-    const avail = this.getAccountSummary().availableBalance;
-    if (avail <= 0.3) return;
-    let effectiveAllocation = cfg.allocationUsdt;
-    let effectiveLeverage = cfg.leverage || 10;
-
-    if (avail < effectiveAllocation) {
-      effectiveAllocation = Number(Math.max(0.6, avail * 0.65).toFixed(2));
-      if (effectiveAllocation > avail) effectiveAllocation = Number((avail * 0.92).toFixed(2));
-      if (this.isLive && effectiveAllocation * effectiveLeverage < 5.6) {
-        effectiveLeverage = Math.min(20, Math.ceil(6.0 / effectiveAllocation));
-      }
+  _resolveLiveSizing(avail, requestedAllocation, requestedLeverage) {
+    const safeAvail = Number(avail || 0);
+    if (safeAvail < 0.32) {
+      return {
+        ok: false,
+        reason: `Insufficient Binance USDT available margin ($${safeAvail.toFixed(2)} available; need >= $0.35 at 20x for Binance $5 min notional)`
+      };
     }
-    if (effectiveAllocation <= 0 || avail < effectiveAllocation) return;
+    const maxSafeMargin = Number((safeAvail * 0.85).toFixed(2));
+    let effectiveAllocation = Math.min(Number(requestedAllocation || 10), maxSafeMargin);
+    effectiveAllocation = Math.max(0.28, Number(effectiveAllocation.toFixed(2)));
+    if (effectiveAllocation > safeAvail * 0.92) {
+      effectiveAllocation = maxSafeMargin;
+    }
 
-    for (const coin of rankedCoins) {
-      if (coin.confidence < cfg.minConfidence) continue;
-      if (coin.action === 'LONG' && cfg.directionPreference === 'SHORT_ONLY') continue;
-      if (coin.action === 'SHORT' && cfg.directionPreference === 'LONG_ONLY') continue;
-      if (activePos.some(p => p.symbol === coin.symbol)) continue;
+    let effectiveLeverage = Math.max(1, Math.min(50, Number(requestedLeverage || 10)));
+    if (effectiveAllocation * effectiveLeverage < 5.6) {
+      effectiveLeverage = Math.min(20, Math.max(effectiveLeverage, Math.ceil(6.0 / Math.max(0.28, effectiveAllocation))));
+    }
+    if (effectiveAllocation * effectiveLeverage < 5.5 && maxSafeMargin * 20 >= 5.5) {
+      effectiveAllocation = Number(Math.min(maxSafeMargin, 0.32).toFixed(2));
+      effectiveLeverage = 20;
+    }
+    const notional = Number((effectiveAllocation * effectiveLeverage).toFixed(2));
+    if (notional < 5.5) {
+      return {
+        ok: false,
+        reason: `Available Binance margin ($${safeAvail.toFixed(2)}) cannot reach Binance $5.50 minimum notional at ${effectiveLeverage}x`
+      };
+    }
+    return { ok: true, effectiveAllocation, effectiveLeverage, notional };
+  }
+
+  _canAffordPair(pair, notional) {
+    const price = this.prices[pair.symbol] || 0;
+    if (!price) return false;
+    const minNotional = pair.minNotional || 5.5;
+    const minCoinCost = (pair.minQty || 0.001) * price;
+    return notional >= Math.max(minNotional, minCoinCost) * 0.98;
+  }
+
+  async _evaluateAutoPilot(rankedCoins) {
+    if (this.isAutoPilotEvaluating || this.externalBackendActive) return;
+    this.isAutoPilotEvaluating = true;
+
+    try {
+      const now = Date.now();
+      if (now - this.lastAutoTradeTime < 20000) return;
+      const cfg = this.autopilotStatus.config;
+      const activePos = this.getActivePositions();
+      if (activePos.length >= cfg.maxOpenTrades) return;
+
+      const avail = this.getAccountSummary().availableBalance;
+      let effectiveAllocation = Number(cfg.allocationUsdt || 10);
+      let effectiveLeverage = Number(cfg.leverage || 10);
 
       if (this.isLive) {
-        const pairInfo = DEFAULT_PAIRS.find(p => p.symbol === coin.symbol);
-        const minNotional = pairInfo?.minNotional || 5.5;
-        const minCoinCost = (pairInfo?.minQty || 0.001) * coin.price;
-        if (effectiveAllocation * effectiveLeverage < Math.max(minNotional, minCoinCost)) {
-          continue; // Pick the next affordable high-confidence coin (e.g. DOGE, XRP, ADA, SUI, NEAR, SOL)
+        const sizing = this._resolveLiveSizing(avail, effectiveAllocation, effectiveLeverage);
+        if (!sizing.ok) {
+          if (now - this.lastAutoPilotErrorTime > 30000) {
+            this.lastAutoPilotErrorTime = now;
+            this.emit('autopilot_error', { message: sizing.reason, timestamp: new Date().toISOString() });
+          }
+          return;
         }
+        effectiveAllocation = sizing.effectiveAllocation;
+        effectiveLeverage = sizing.effectiveLeverage;
+      } else {
+        if (avail < 1) return;
+        effectiveAllocation = Math.min(effectiveAllocation, Number((avail * 0.85).toFixed(2)));
+        if (effectiveAllocation <= 0 || avail < effectiveAllocation) return;
       }
 
-      try {
+      for (const coin of rankedCoins) {
+        if (coin.confidence < cfg.minConfidence) continue;
+        if (coin.action === 'HOLD') continue;
+        if (coin.action === 'LONG' && cfg.directionPreference === 'SHORT_ONLY') continue;
+        if (coin.action === 'SHORT' && cfg.directionPreference === 'LONG_ONLY') continue;
+        if (activePos.some(p => p.symbol === coin.symbol)) continue;
+
         if (this.isLive) {
-          await this.executeLiveBinanceOrder({
-            symbol: coin.symbol,
-            side: coin.action,
-            amountUsdt: effectiveAllocation,
-            leverage: effectiveLeverage,
-            tp: coin.tpPrice,
-            sl: coin.slPrice,
-            trailingStopPct: 2.0
-          });
-          this.emit('autopilot_trade', {
-            id: `AP-${now}`,
-            timestamp: new Date().toISOString(),
-            message: `AI Auto-Pilot opened LIVE ${coin.action} on ${coin.symbol} @ $${coin.price} ($${effectiveAllocation} Margin, ${effectiveLeverage}x, Conf: ${coin.confidence}%)`,
-            position: { symbol: coin.symbol, side: coin.action }
-          });
-        } else {
-          const pos = this.openPosition({
-            symbol: coin.symbol,
-            side: coin.action,
-            amountUsdt: effectiveAllocation,
-            leverage: effectiveLeverage,
-            tp: coin.tpPrice,
-            sl: coin.slPrice,
-            trailingStopPct: 2.0,
-            source: 'AI_AUTO_PILOT'
-          });
-          this.emit('autopilot_trade', {
-            id: `AP-${now}`,
-            timestamp: new Date().toISOString(),
-            message: `AI Auto-Pilot opened ${coin.action} on ${coin.symbol} @ $${coin.price} (Conf: ${coin.confidence}%)`,
-            position: pos
-          });
+          const pairInfo = DEFAULT_PAIRS.find(p => p.symbol === coin.symbol);
+          const minNotional = pairInfo?.minNotional || 5.5;
+          const minCoinCost = (pairInfo?.minQty || 0.001) * coin.price;
+          if (effectiveAllocation * effectiveLeverage < Math.max(minNotional, minCoinCost) * 0.98) {
+            continue; // Pick the next affordable high-confidence coin
+          }
         }
-        this.lastAutoTradeTime = now;
-        this._saveState();
-        this._pushCloudSync();
-        break;
-      } catch {}
+
+        try {
+          if (this.isLive) {
+            await this.executeLiveBinanceOrder({
+              symbol: coin.symbol,
+              side: coin.action,
+              amountUsdt: effectiveAllocation,
+              leverage: effectiveLeverage,
+              tp: coin.tpPrice,
+              sl: coin.slPrice,
+              trailingStopPct: 2.0
+            });
+            this.emit('autopilot_trade', {
+              id: `AP-${now}`,
+              timestamp: new Date().toISOString(),
+              message: `AI Auto-Pilot opened LIVE ${coin.action} on ${coin.symbol} @ $${coin.price} ($${effectiveAllocation} Margin, ${effectiveLeverage}x, Conf: ${coin.confidence}%)`,
+              position: { symbol: coin.symbol, side: coin.action }
+            });
+          } else {
+            const pos = this.openPosition({
+              symbol: coin.symbol,
+              side: coin.action,
+              amountUsdt: effectiveAllocation,
+              leverage: effectiveLeverage,
+              tp: coin.tpPrice,
+              sl: coin.slPrice,
+              trailingStopPct: 2.0,
+              source: 'AI_AUTO_PILOT'
+            });
+            this.emit('autopilot_trade', {
+              id: `AP-${now}`,
+              timestamp: new Date().toISOString(),
+              message: `AI Auto-Pilot opened ${coin.action} on ${coin.symbol} @ $${coin.price} (Conf: ${coin.confidence}%)`,
+              position: pos
+            });
+          }
+          this.lastAutoTradeTime = now;
+          this._saveState();
+          this._pushCloudSync();
+          break;
+        } catch (err) {
+          if (now - this.lastAutoPilotErrorTime > 15000) {
+            this.lastAutoPilotErrorTime = now;
+            this.emit('autopilot_error', {
+              symbol: coin.symbol,
+              message: `Auto-Pilot failed on ${coin.symbol}: ${err.message}`,
+              timestamp: new Date().toISOString()
+            });
+          }
+        }
+      }
+    } finally {
+      this.isAutoPilotEvaluating = false;
     }
   }
 
-  async _evaluateBotCycle() {
-    let sym = this.botStatus.symbol || 'BTCUSDT';
-    const activePos = this.getActivePositions();
-    const avail = this.getAccountSummary().availableBalance;
-    if (avail <= 0.3) return;
+  _addBotLog(message, type = 'INFO') {
+    const log = {
+      id: `LOG-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+      timestamp: new Date().toISOString(),
+      message,
+      type
+    };
+    this.botStatus.recentLogs = [log, ...(this.botStatus.recentLogs || [])].slice(0, 50);
+    this._saveState();
+    this.emit('bot_log', log);
+  }
 
-    let effectiveAllocation = this.botStatus.allocationUsdt;
-    let effectiveLeverage = this.botStatus.leverage || 10;
-    if (avail < effectiveAllocation) {
-      effectiveAllocation = Number(Math.max(0.6, avail * 0.65).toFixed(2));
-      if (effectiveAllocation > avail) effectiveAllocation = Number((avail * 0.92).toFixed(2));
-      if (this.isLive && effectiveAllocation * effectiveLeverage < 5.6) {
-        effectiveLeverage = Math.min(20, Math.ceil(6.0 / effectiveAllocation));
-      }
-    }
+  _calculateBotSignal(strategyId, ind) {
+    const { price, rsi, macd, bollinger, ema, adx, volume, supertrend, divergence, traps, candlePatterns } = ind;
+    let action = 'HOLD';
+    let confidence = 50;
+    let rationale = '';
 
-    if (this.isLive) {
-      const pairInfo = DEFAULT_PAIRS.find(p => p.symbol === sym);
-      const pPrice = this.prices[sym] || 68000;
-      const minReq = Math.max(pairInfo?.minNotional || 5.5, (pairInfo?.minQty || 0.001) * pPrice);
-      if (effectiveAllocation * effectiveLeverage < minReq) {
-        const affordable = ['DOGEUSDT', 'XRPUSDT', 'ADAUSDT', 'SUIUSDT', 'NEARUSDT', 'SOLUSDT'];
-        sym = affordable.find(s => !activePos.some(p => p.symbol === s)) || 'DOGEUSDT';
-      }
-    }
-
-    const candles = await this.fetchKlines(sym, this.botStatus.timeframe || '15m', 60);
-    const ind = calculateAllIndicators(candles);
-    if (!ind) return;
-
-    const isBull = ind.supertrend.direction === 'BULLISH' || ind.macd.histogram >= 0 || ind.price >= ind.ema.ema21;
-    let action = isBull ? 'LONG' : 'SHORT';
-    if (this.botStatus.direction === 'LONG_ONLY') action = 'LONG';
-    if (this.botStatus.direction === 'SHORT_ONLY') action = 'SHORT';
-    const rationale = `${this.botStatus.activeStrategyId} signal on ${sym} (SuperTrend: ${ind.supertrend.direction}, RSI: ${ind.rsi})`;
-
-    const existing = activePos.find(p => p.symbol === sym);
-    if (!existing && effectiveAllocation > 0 && avail >= effectiveAllocation) {
-      const price = this.prices[sym] || ind.price;
-      const tp = action === 'LONG'
-        ? price * (1 + this.botStatus.takeProfitPct / 100 / effectiveLeverage)
-        : price * (1 - this.botStatus.takeProfitPct / 100 / effectiveLeverage);
-      const sl = action === 'LONG'
-        ? price * (1 - this.botStatus.stopLossPct / 100 / effectiveLeverage)
-        : price * (1 + this.botStatus.stopLossPct / 100 / effectiveLeverage);
-
-      try {
-        if (this.isLive) {
-          await this.executeLiveBinanceOrder({
-            symbol: sym,
-            side: action,
-            amountUsdt: effectiveAllocation,
-            leverage: effectiveLeverage,
-            tp,
-            sl,
-            trailingStopPct: 2.0
-          });
-        } else {
-          this.openPosition({
-            symbol: sym,
-            side: action,
-            amountUsdt: effectiveAllocation,
-            leverage: effectiveLeverage,
-            tp,
-            sl,
-            trailingStopPct: 2.0,
-            source: 'AUTO_BOT'
-          });
+    switch (strategyId) {
+      case 'trend_following': {
+        if ((ema.goldenCross || ema.bullishAlignment || supertrend.direction === 'BULLISH') && price >= ema.ema21 && rsi < 74) {
+          action = 'LONG';
+          confidence = 85;
+          rationale = `Trend Following Bullish: EMA9 >= EMA21 | SuperTrend BULL | ADX ${adx.adx}`;
+        } else if ((ema.deathCross || ema.bearishAlignment || supertrend.direction === 'BEARISH') && price <= ema.ema21 && rsi > 26) {
+          action = 'SHORT';
+          confidence = 85;
+          rationale = `Trend Following Bearish: EMA9 <= EMA21 | SuperTrend BEAR | ADX ${adx.adx}`;
+        } else if (supertrend.direction === 'BULLISH' && macd.histogram >= 0 && rsi < 68) {
+          action = 'LONG';
+          confidence = 78;
+          rationale = `Trend Continuation LONG: SuperTrend BULL & MACD Hist +${macd.histogram}`;
+        } else if (supertrend.direction === 'BEARISH' && macd.histogram < 0 && rsi > 32) {
+          action = 'SHORT';
+          confidence = 78;
+          rationale = `Trend Continuation SHORT: SuperTrend BEAR & MACD Hist ${macd.histogram}`;
         }
-
-        const log = {
-          id: `LOG-${Date.now()}`,
-          timestamp: new Date().toISOString(),
-          message: `⚡ Auto-Trade Executed: ${action} ${sym} @ $${price.toFixed(4)} ($${effectiveAllocation} Margin, ${effectiveLeverage}x) | ${rationale}`,
-          type: 'ORDER'
-        };
-        this.botStatus.recentLogs = [log, ...(this.botStatus.recentLogs || [])].slice(0, 50);
-        this._saveState();
-        this._pushCloudSync();
-        this.emit('bot_log', log);
-      } catch (err) {
-        const errLog = {
-          id: `LOG-${Date.now()}`,
-          timestamp: new Date().toISOString(),
-          message: `⚠️ Auto-Bot retry on ${sym}: ${err.message}`,
-          type: 'ERROR'
-        };
-        this.botStatus.recentLogs = [errLog, ...(this.botStatus.recentLogs || [])].slice(0, 50);
-        this.emit('bot_log', errLog);
+        break;
       }
+      case 'breakout_trading': {
+        if (price >= bollinger.middle && (macd.histogram >= 0 || volume.surgeRatio >= 1.05)) {
+          action = 'LONG';
+          confidence = 84;
+          rationale = `Bollinger Upper Expansion ($${price} > Mid $${bollinger.middle}) with ${volume.surgeRatio}x Vol`;
+        } else if (price < bollinger.middle && (macd.histogram < 0 || volume.surgeRatio >= 1.05)) {
+          action = 'SHORT';
+          confidence = 84;
+          rationale = `Bollinger Lower Breakdown ($${price} < Mid $${bollinger.middle}) with ${volume.surgeRatio}x Vol`;
+        }
+        break;
+      }
+      case 'mean_reversion': {
+        if (rsi <= 48 || price <= bollinger.lower * 1.003) {
+          action = 'LONG';
+          confidence = 80;
+          rationale = `Mean Reversion Long Bounce: RSI ${rsi} near BB Lower`;
+        } else if (rsi >= 52 || price >= bollinger.upper * 0.997) {
+          action = 'SHORT';
+          confidence = 80;
+          rationale = `Mean Reversion Short Pullback: RSI ${rsi} near BB Upper`;
+        }
+        break;
+      }
+      case 'momentum_scalper': {
+        if (macd.histogram >= 0 || rsi >= 52) {
+          action = 'LONG';
+          confidence = 83;
+          rationale = `Momentum Scalper Long: MACD Hist ${macd.histogram} & RSI ${rsi}`;
+        } else {
+          action = 'SHORT';
+          confidence = 83;
+          rationale = `Momentum Scalper Short: MACD Hist ${macd.histogram} & RSI ${rsi}`;
+        }
+        break;
+      }
+      case 'swing_trader': {
+        if (supertrend.direction === 'BULLISH' || price >= ema.ema50) {
+          action = 'LONG';
+          confidence = 80;
+          rationale = `Swing Wave Bullish: SuperTrend ${supertrend.direction}`;
+        } else {
+          action = 'SHORT';
+          confidence = 80;
+          rationale = `Swing Wave Bearish: SuperTrend ${supertrend.direction}`;
+        }
+        break;
+      }
+      case 'grid_dca': {
+        if (price <= ema.ema21 || rsi <= 50) {
+          action = 'LONG';
+          confidence = 76;
+          rationale = `Grid DCA Dip Buy: Price $${price} <= EMA21, RSI ${rsi}`;
+        } else {
+          action = 'SHORT';
+          confidence = 76;
+          rationale = `Grid DCA Peak Sell: Price $${price} > EMA21, RSI ${rsi}`;
+        }
+        break;
+      }
+      case 'arbitrage_scanner': {
+        const dev = ema.ema21 > 0 ? ((price - ema.ema21) / ema.ema21) * 100 : 0;
+        if (dev <= 0) {
+          action = 'LONG';
+          confidence = 78;
+          rationale = `Arbitrage Mean Capture Long: Spread ${dev.toFixed(2)}% below EMA21`;
+        } else {
+          action = 'SHORT';
+          confidence = 78;
+          rationale = `Arbitrage Mean Capture Short: Spread +${dev.toFixed(2)}% above EMA21`;
+        }
+        break;
+      }
+      case 'ai_sentiment_ml':
+      default: {
+        let score = 0;
+        if (supertrend.direction === 'BULLISH') score += 25; else score -= 25;
+        if (ema.goldenCross) score += 25; else if (ema.deathCross) score -= 25;
+        else if (ema.bullishAlignment) score += 15; else if (ema.bearishAlignment) score -= 15;
+        else if (price >= ema.ema21) score += 10; else score -= 10;
+
+        if (macd.crossover === 'BULLISH') score += 18;
+        else if (macd.crossover === 'BEARISH') score -= 18;
+        else score += macd.histogram >= 0 ? 12 : -12;
+
+        if (rsi < 35) score += 15;
+        else if (rsi > 70) score -= 15;
+        else if (rsi >= 50) score += 8;
+        else score -= 8;
+
+        if (divergence?.detected) {
+          score += divergence.type.startsWith('BULLISH') ? 20 : -20;
+        }
+        if (volume?.isHighVolume) {
+          score += score >= 0 ? 10 : -10;
+        }
+        if (candlePatterns?.length > 0) {
+          for (const cp of candlePatterns) {
+            score += cp.type === 'BULLISH' ? 10 : -10;
+          }
+        }
+        if (traps?.isBullTrap) score -= 25;
+        if (traps?.isBearTrap) score += 25;
+        if (traps?.isFallingKnife) score = Math.min(-25, score - 20);
+
+        if (score >= 15 && !traps?.isFallingKnife && !traps?.isBullTrap) {
+          action = 'LONG';
+          confidence = Math.min(95, Math.round(62 + Math.abs(score) * 0.35));
+          rationale = `AI Confluence +${score} Bullish (SuperTrend: ${supertrend.direction}, RSI: ${rsi})`;
+        } else if (score <= -15 && !traps?.isBearTrap) {
+          action = 'SHORT';
+          confidence = Math.min(95, Math.round(62 + Math.abs(score) * 0.35));
+          rationale = `AI Confluence ${score} Bearish (SuperTrend: ${supertrend.direction}, RSI: ${rsi})`;
+        } else {
+          action = 'HOLD';
+          confidence = 55;
+          rationale = `AI Confluence neutral (score ${score}, RSI ${rsi})`;
+        }
+        break;
+      }
+    }
+    return { action, confidence, rationale };
+  }
+
+  async _evaluateBotCycle() {
+    if (!this.botStatus.isRunning || this.isBotEvaluating || this.externalBackendActive) return;
+    this.isBotEvaluating = true;
+
+    try {
+      const now = Date.now();
+      const activePos = this.getActivePositions();
+      const avail = this.getAccountSummary().availableBalance;
+      let sizing = {
+        ok: true,
+        effectiveAllocation: this.botStatus.allocationUsdt,
+        effectiveLeverage: this.botStatus.leverage || 10,
+        notional: (this.botStatus.allocationUsdt || 500) * (this.botStatus.leverage || 10)
+      };
+
+      if (this.isLive) {
+        sizing = this._resolveLiveSizing(avail, this.botStatus.allocationUsdt, this.botStatus.leverage);
+      } else {
+        if (avail < 1) {
+          if (now - this.lastBotErrorTime > 25000) {
+            this.lastBotErrorTime = now;
+            this._addBotLog(`⚠️ Demo balance exhausted ($${avail.toFixed(2)}). Reset demo wallet in Settings.`, 'ERROR');
+          }
+          return;
+        }
+        sizing.effectiveAllocation = Math.min(this.botStatus.allocationUsdt, Number((avail * 0.9).toFixed(2)));
+        sizing.notional = sizing.effectiveAllocation * sizing.effectiveLeverage;
+      }
+
+      const configuredSymbol = this.botStatus.symbol || 'AUTO_BEST';
+      let candidatePairs = [];
+
+      if (configuredSymbol === 'AUTO_BEST') {
+        const affordable = DEFAULT_PAIRS.filter(p => !this.isLive || this._canAffordPair(p, sizing.ok ? sizing.notional : 6));
+        const idlePairs = affordable.filter(p => !activePos.some(pos => pos.symbol === p.symbol));
+        candidatePairs = idlePairs.length > 0 ? idlePairs : affordable;
+      } else {
+        const reqPair = DEFAULT_PAIRS.find(p => p.symbol === configuredSymbol) || {
+          symbol: configuredSymbol,
+          minQty: 0.01,
+          minNotional: 5.5
+        };
+        if (this.isLive && sizing.ok && !this._canAffordPair(reqPair, sizing.notional)) {
+          const affordable = DEFAULT_PAIRS.filter(p => this._canAffordPair(p, sizing.notional));
+          const idlePairs = affordable.filter(p => !activePos.some(pos => pos.symbol === p.symbol));
+          candidatePairs = idlePairs.length > 0 ? idlePairs : affordable;
+          const switchKey = `${configuredSymbol}->${candidatePairs[0]?.symbol || 'NONE'}`;
+          if (candidatePairs.length > 0 && this.lastBotSwitchKey !== switchKey) {
+            this.lastBotSwitchKey = switchKey;
+            this._addBotLog(
+              `💡 ${configuredSymbol} needs higher min notional than $${sizing.notional.toFixed(2)} — auto-routing Live Bot to affordable pairs (${candidatePairs.slice(0, 4).map(p => p.symbol).join(', ')}).`,
+              'INFO'
+            );
+          }
+        } else {
+          candidatePairs = [reqPair];
+        }
+      }
+
+      if (candidatePairs.length === 0) {
+        if (now - this.lastBotErrorTime > 25000) {
+          this.lastBotErrorTime = now;
+          this._addBotLog(sizing.reason || '⚠️ No eligible trading pairs for current balance.', 'ERROR');
+        }
+        return;
+      }
+
+      let bestEval = null;
+      const evalLimit = configuredSymbol === 'AUTO_BEST' ? 6 : Math.min(candidatePairs.length, 4);
+
+      for (const pair of candidatePairs.slice(0, evalLimit)) {
+        const candles = await this.fetchKlines(pair.symbol, this.botStatus.timeframe || '15m', 60);
+        const ind = calculateAllIndicators(candles);
+        if (!ind) continue;
+
+        const price = this.prices[pair.symbol] || ind.price;
+        const signal = this._calculateBotSignal(this.botStatus.activeStrategyId, ind);
+        const existingPos = activePos.find(p => p.symbol === pair.symbol);
+
+        const dirAllowed =
+          signal.action === 'HOLD' ||
+          (signal.action === 'LONG' && this.botStatus.direction !== 'SHORT_ONLY') ||
+          (signal.action === 'SHORT' && this.botStatus.direction !== 'LONG_ONLY');
+
+        const actionable = dirAllowed && signal.action !== 'HOLD' && (!existingPos || existingPos.side !== signal.action);
+        const cand = { symbol: pair.symbol, ind, signal, price, existingPos, actionable };
+        if (!bestEval) bestEval = cand;
+        else if (cand.actionable && !bestEval.actionable) bestEval = cand;
+        else if (cand.actionable === bestEval.actionable && cand.signal.confidence > bestEval.signal.confidence) bestEval = cand;
+      }
+
+      if (!bestEval) return;
+      const { symbol: sym, ind, signal, price, existingPos: existing } = bestEval;
+
+      this.botStatus.lastScanSummary = {
+        symbol: sym,
+        strategyId: this.botStatus.activeStrategyId,
+        mode: this.isLive ? 'LIVE' : 'DEMO',
+        signal: signal.action,
+        confidence: signal.confidence,
+        price,
+        rsi: ind.rsi,
+        supertrend: ind.supertrend?.direction,
+        holdingSide: existing?.side || null,
+        effectiveMargin: sizing.effectiveAllocation,
+        effectiveLeverage: sizing.effectiveLeverage,
+        updatedAt: new Date().toISOString()
+      };
+      this.emit('bot_status', { ...this.botStatus });
+
+      if (this.isLive && !sizing.ok) {
+        if (now - this.lastBotErrorTime > 25000) {
+          this.lastBotErrorTime = now;
+          this._addBotLog(`⚠️ Auto-Bot standby: ${sizing.reason}`, 'ERROR');
+        }
+        return;
+      }
+
+      const isFiltered =
+        (signal.action === 'LONG' && this.botStatus.direction === 'SHORT_ONLY') ||
+        (signal.action === 'SHORT' && this.botStatus.direction === 'LONG_ONLY');
+
+      if (signal.action !== 'HOLD' && !isFiltered && (!existing || existing.side !== signal.action)) {
+        if (now - this.lastBotTradeTime > 20000) {
+          const effAlloc = sizing.effectiveAllocation;
+          const effLev = sizing.effectiveLeverage;
+          const tp = signal.action === 'LONG'
+            ? price * (1 + this.botStatus.takeProfitPct / 100 / effLev)
+            : price * (1 - this.botStatus.takeProfitPct / 100 / effLev);
+          const sl = signal.action === 'LONG'
+            ? price * (1 - this.botStatus.stopLossPct / 100 / effLev)
+            : price * (1 + this.botStatus.stopLossPct / 100 / effLev);
+
+          try {
+            if (existing && existing.side !== signal.action) {
+              this._addBotLog(`🔄 Reversing position from ${existing.side} to ${signal.action} on ${sym}`, 'SIGNAL');
+              if (this.isLive) {
+                await this.closeLiveBinancePosition(existing.id, 'AUTO_STRATEGY_REVERSE');
+              } else {
+                this.closePosition(existing.id, 'AUTO_STRATEGY_REVERSE');
+              }
+            }
+
+            if (this.isLive) {
+              await this.executeLiveBinanceOrder({
+                symbol: sym,
+                side: signal.action,
+                amountUsdt: effAlloc,
+                leverage: effLev,
+                tp,
+                sl,
+                trailingStopPct: this.botStatus.trailingStopPct || 2.0
+              });
+            } else {
+              this.openPosition({
+                symbol: sym,
+                side: signal.action,
+                amountUsdt: effAlloc,
+                leverage: effLev,
+                tp,
+                sl,
+                trailingStopPct: this.botStatus.trailingStopPct || 2.0,
+                source: 'AUTO_BOT'
+              });
+            }
+
+            this.lastBotTradeTime = now;
+            this._addBotLog(
+              `⚡ Auto-Trade Executed: ${signal.action} ${sym} @ $${price.toFixed(4)} ($${effAlloc} Margin, ${effLev}x) | ${signal.rationale}${this.isLive ? ' [LIVE BINANCE]' : ' [DEMO]'}`,
+              'ORDER'
+            );
+            this._pushCloudSync();
+            this.emit('bot_status', { ...this.botStatus });
+            return;
+          } catch (err) {
+            this._addBotLog(`❌ Auto-Bot order failed on ${sym}: ${err.message}`, 'ERROR');
+            return;
+          }
+        }
+      }
+
+      if (now - this.lastBotHeartbeatTime > 25000) {
+        this.lastBotHeartbeatTime = now;
+        const modeTag = this.isLive ? 'LIVE' : 'DEMO';
+        if (existing) {
+          this._addBotLog(
+            `📡 [${modeTag}] Monitoring open ${existing.side} ${sym} (${existing.roePct >= 0 ? '+' : ''}${existing.roePct || 0}% ROE) | Price $${price} | Signal: ${signal.action}`,
+            'INFO'
+          );
+        } else if (isFiltered) {
+          this._addBotLog(
+            `🔍 [${modeTag}] ${sym} signal is ${signal.action}, filtered by ${this.botStatus.direction}`,
+            'INFO'
+          );
+        } else {
+          this._addBotLog(
+            `🔍 [${modeTag}] Scanning ${sym} (${this.botStatus.activeStrategyId}): ${signal.action} (${signal.confidence}%) | Price $${price} | RSI ${ind.rsi}`,
+            signal.action === 'HOLD' ? 'INFO' : 'SIGNAL'
+          );
+        }
+      }
+    } catch (err) {
+      if (Date.now() - this.lastBotErrorTime > 20000) {
+        this.lastBotErrorTime = Date.now();
+        this._addBotLog(`❌ Bot cycle error: ${err.message}`, 'ERROR');
+      }
+    } finally {
+      this.isBotEvaluating = false;
     }
   }
 
@@ -1742,7 +2129,7 @@ class StandaloneTradingEngine {
           throw { status: 400, data: { success: false, error: 'Please enter and verify your Binance API Key & Secret Key in Settings first!' } };
         }
         try {
-          const liveRes = await this.verifyAndLoadLiveAccount(savedKey, savedSecret);
+          const liveRes = await this.verifyAndLoadLiveAccount(savedKey, savedSecret, { pushSync: true });
           return liveRes;
         } catch (err) {
           throw { status: 400, data: { success: false, error: err.message } };
@@ -1750,6 +2137,7 @@ class StandaloneTradingEngine {
       }
       this.isLive = false;
       this._saveState();
+      this._pushCloudSync();
       const summary = this.getAccountSummary();
       this.emit('account_summary', summary);
       this.emit('positions_update', [...this.positions]);
@@ -1763,7 +2151,7 @@ class StandaloneTradingEngine {
     if (path === '/api/account/api-keys' && method === 'POST') {
       const { apiKey, apiSecret } = body;
       try {
-        return await this.verifyAndLoadLiveAccount(apiKey, apiSecret);
+        return await this.verifyAndLoadLiveAccount(apiKey, apiSecret, { pushSync: true });
       } catch (err) {
         throw {
           status: 400,
@@ -1801,30 +2189,86 @@ class StandaloneTradingEngine {
       const candles = await this.fetchKlines(symbol, tf, 60);
       const ind = calculateAllIndicators(candles);
       const currentPrice = this.prices[symbol] || ind?.price || 68500;
-      const isBull = ind ? ind.supertrend.direction === 'BULLISH' : true;
-      const aiScore = isBull ? 64 : -58;
+      if (!ind) {
+        return { symbol, currentPrice, aiScore: 0, recommendation: 'NEUTRAL', confidence: 50, patterns: [], factors: [], sentiment: {} };
+      }
+      const { rsi, macd, bollinger, ema, volume, supertrend, divergence, candlePatterns, traps } = ind;
+      const factors = [];
+      let score = 0;
+
+      if (ema.goldenCross) { score += 25; factors.push({ name: 'EMA Golden Cross', impact: '+25', status: 'BULLISH' }); }
+      else if (ema.deathCross) { score -= 25; factors.push({ name: 'EMA Death Cross', impact: '-25', status: 'BEARISH' }); }
+      else if (ema.bullishAlignment) { score += 15; factors.push({ name: 'Bullish EMA Alignment (9>21>50)', impact: '+15', status: 'BULLISH' }); }
+      else if (ema.bearishAlignment) { score -= 15; factors.push({ name: 'Bearish EMA Alignment (9<21<50)', impact: '-15', status: 'BEARISH' }); }
+
+      if (divergence?.detected) {
+        const isBullDiv = divergence.type.startsWith('BULLISH');
+        score += isBullDiv ? 25 : -25;
+        factors.push({ name: divergence.label, impact: isBullDiv ? '+25' : '-25', status: isBullDiv ? 'BULLISH' : 'BEARISH' });
+      } else if (rsi < 30) {
+        score += 15; factors.push({ name: `RSI Oversold Bounce (${rsi})`, impact: '+15', status: 'BULLISH' });
+      } else if (rsi > 70) {
+        score -= 15; factors.push({ name: `RSI Overbought Pullback (${rsi})`, impact: '-15', status: 'BEARISH' });
+      } else if (rsi >= 50) {
+        score += 10; factors.push({ name: `RSI Bullish Zone (${rsi})`, impact: '+10', status: 'BULLISH' });
+      } else {
+        score -= 8; factors.push({ name: `RSI Bearish Zone (${rsi})`, impact: '-8', status: 'BEARISH' });
+      }
+
+      if (macd.crossover === 'BULLISH') { score += 15; factors.push({ name: 'MACD Bullish Crossover', impact: '+15', status: 'BULLISH' }); }
+      else if (macd.crossover === 'BEARISH') { score -= 15; factors.push({ name: 'MACD Bearish Crossover', impact: '-15', status: 'BEARISH' }); }
+      else {
+        score += macd.histogram >= 0 ? 8 : -8;
+        factors.push({ name: `MACD Momentum (${macd.histogram})`, impact: macd.histogram >= 0 ? '+8' : '-8', status: macd.histogram >= 0 ? 'BULLISH' : 'BEARISH' });
+      }
+
+      if (bollinger.isSqueeze) factors.push({ name: 'Volatility Squeeze Imminent Breakout', impact: '0', status: 'ALERT' });
+      if (volume.isHighVolume) {
+        score += score >= 0 ? 15 : -15;
+        factors.push({ name: `Volume Surge (${volume.surgeRatio}x)`, impact: score >= 0 ? '+15' : '-15', status: 'CONFIRMING' });
+      }
+
+      if (supertrend.direction === 'BULLISH') { score += 15; factors.push({ name: 'SuperTrend Bullish Support', impact: '+15', status: 'BULLISH' }); }
+      else { score -= 15; factors.push({ name: 'SuperTrend Bearish Resistance', impact: '-15', status: 'BEARISH' }); }
+
+      if (traps?.alert) {
+        factors.push({ name: traps.alert, impact: traps.isBullTrap ? '-20' : traps.isBearTrap ? '+20' : '-25', status: 'ALERT' });
+        if (traps.isBullTrap) score -= 20;
+        if (traps.isBearTrap) score += 20;
+        if (traps.isFallingKnife) score = Math.min(-30, score - 20);
+      }
+
+      const finalScore = Math.min(100, Math.max(-100, score));
+      let recommendation = 'NEUTRAL';
+      let targetPrice = currentPrice;
+      let stopLoss = currentPrice;
+      if (finalScore >= 50) { recommendation = 'STRONG LONG'; targetPrice = currentPrice * 1.035; stopLoss = currentPrice * 0.985; }
+      else if (finalScore >= 18) { recommendation = 'MODERATE LONG'; targetPrice = currentPrice * 1.02; stopLoss = currentPrice * 0.99; }
+      else if (finalScore <= -50) { recommendation = 'STRONG SHORT'; targetPrice = currentPrice * 0.965; stopLoss = currentPrice * 1.015; }
+      else if (finalScore <= -18) { recommendation = 'MODERATE SHORT'; targetPrice = currentPrice * 0.98; stopLoss = currentPrice * 1.01; }
+
+      const patterns = [];
+      if (divergence?.detected) patterns.push(divergence.label);
+      candlePatterns?.forEach(p => patterns.push(p.name));
+      if (bollinger.isSqueeze) patterns.push('Bollinger Band Squeeze');
+      if (ema.goldenCross) patterns.push('Golden Cross Breakout');
+      if (traps?.alert) patterns.push(traps.alert);
+      if (patterns.length === 0) patterns.push('Multi-Timeframe Structure Alignment');
+
       return {
         symbol,
         currentPrice,
-        aiScore,
-        recommendation: isBull ? 'STRONG LONG' : 'STRONG SHORT',
-        confidence: 82,
-        targetPrice: Number((currentPrice * (isBull ? 1.035 : 0.965)).toFixed(2)),
-        stopLoss: Number((currentPrice * (isBull ? 0.985 : 1.015)).toFixed(2)),
+        aiScore: finalScore,
+        recommendation,
+        confidence: Math.min(96, Math.max(50, Math.round(50 + Math.abs(finalScore) / 2))),
+        targetPrice: Number(targetPrice.toFixed(4)),
+        stopLoss: Number(stopLoss.toFixed(4)),
         riskRewardRatio: '1:2.4',
-        patterns: [
-          ind?.bollinger?.isSqueeze ? 'Bollinger Band Squeeze' : 'Multi-Timeframe Trend Alignment',
-          ...(ind?.candlePatterns?.map(p => p.name) || ['Institutional Volume Confluence'])
-        ],
-        factors: [
-          { name: isBull ? 'SuperTrend Bullish Support' : 'SuperTrend Bearish Resistance', impact: isBull ? '+25' : '-25', status: isBull ? 'BULLISH' : 'BEARISH' },
-          { name: `RSI Momentum (${ind?.rsi || 54})`, impact: isBull ? '+15' : '-15', status: isBull ? 'BULLISH' : 'BEARISH' },
-          { name: `Volume Surge (${ind?.volume?.surgeRatio || 1.2}x)`, impact: '+14', status: 'CONFIRMING' },
-          { name: 'EMA 9/21/50 Structure', impact: isBull ? '+15' : '-15', status: isBull ? 'BULLISH' : 'BEARISH' }
-        ],
+        patterns,
+        factors,
         sentiment: {
-          fearGreedIndex: 68,
-          sentimentStatus: 'BULLISH',
+          fearGreedIndex: finalScore >= 0 ? 66 : 38,
+          sentimentStatus: finalScore >= 0 ? 'BULLISH' : 'CAUTIOUS',
           socialVolumeSurge: '+24.5%',
           newsHeadlines: [
             { title: 'Bitcoin ETF Inflows Surge Past $850M in Record Institutional Week', sentiment: 'POSITIVE', impact: 'HIGH', time: '12m ago' },
@@ -1883,36 +2327,43 @@ class StandaloneTradingEngine {
     }
     if (path === '/api/bot/status') return this.botStatus;
     if (path === '/api/bot/config' && method === 'POST') {
+      this.lastLocalControlTime = Date.now();
+      this.lastBotSwitchKey = '';
       this.botStatus = { ...this.botStatus, ...body };
       this._saveState();
       this._pushCloudSync();
-      this.emit('bot_status', this.botStatus);
+      this.emit('bot_status', { ...this.botStatus });
       return this.botStatus;
     }
     if (path === '/api/bot/start' && method === 'POST') {
+      this.lastLocalControlTime = Date.now();
+      this.lastBotTradeTime = 0;
+      this.lastBotHeartbeatTime = 0;
       this.botStatus.isRunning = true;
       const log = {
         id: `LOG-${Date.now()}`,
         timestamp: new Date().toISOString(),
-        message: `🚀 Auto-Trading Bot STARTED (${this.botStatus.activeStrategyId}, ${this.botStatus.direction})`,
-        type: 'INFO'
+        message: `🚀 Auto-Trading Bot STARTED [${this.isLive ? 'LIVE BINANCE' : 'DEMO'}] | ${this.botStatus.activeStrategyId} | Pair: ${this.botStatus.symbol || 'AUTO_BEST'} (${this.botStatus.direction})`,
+        type: 'SUCCESS'
       };
       this.botStatus.recentLogs = [log, ...(this.botStatus.recentLogs || [])].slice(0, 50);
       this._saveState();
       this._pushCloudSync();
-      this.emit('bot_status', this.botStatus);
+      this.emit('bot_status', { ...this.botStatus });
       this._evaluateBotCycle();
       return this.botStatus;
     }
     if (path === '/api/bot/stop' && method === 'POST') {
+      this.lastLocalControlTime = Date.now();
       this.botStatus.isRunning = false;
-      this._saveState();
+      this._addBotLog('🛑 Auto-Trading Bot STOPPED by user', 'INFO');
       this._pushCloudSync();
-      this.emit('bot_status', this.botStatus);
+      this.emit('bot_status', { ...this.botStatus });
       return this.botStatus;
     }
     if (path === '/api/autopilot/status') return this.autopilotStatus;
     if (path === '/api/autopilot/start' && method === 'POST') {
+      this.lastLocalControlTime = Date.now();
       this.autopilotStatus.isAutoPilotRunning = true;
       this.lastAutoTradeTime = 0; // Immediate evaluation on activation
       this._saveState();
@@ -1926,6 +2377,7 @@ class StandaloneTradingEngine {
       return this.autopilotStatus;
     }
     if (path === '/api/autopilot/stop' && method === 'POST') {
+      this.lastLocalControlTime = Date.now();
       this.autopilotStatus.isAutoPilotRunning = false;
       this._saveState();
       this._pushCloudSync();
@@ -1933,6 +2385,7 @@ class StandaloneTradingEngine {
       return this.autopilotStatus;
     }
     if (path === '/api/autopilot/config' && method === 'POST') {
+      this.lastLocalControlTime = Date.now();
       this.autopilotStatus.config = { ...this.autopilotStatus.config, ...body };
       this._saveState();
       this._pushCloudSync();
